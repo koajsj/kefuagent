@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from jsonschema import Draft202012Validator, SchemaError
 from pydantic import Field, field_validator
 
+from support_agent.rag_schemas import Citation
 from support_agent.schemas import Input, Output
 
 # A deliberately bounded subset: no refs, regex, combinators or executable extensions.
@@ -143,6 +144,7 @@ class ExecutionContext:
     membership_id: UUID
     role: str
     request_id: UUID
+    public_session_id: UUID | None = None
     conversation_id: UUID | None = None
     agent_config_id: UUID | None = None
     model_call_id: UUID | None = None
@@ -203,9 +205,19 @@ class ExecutionOut(Output):
 
 
 class AgentTurnInput(Input):
+    knowledge_base_ids: list[UUID] | None = Field(default=None, max_length=10)
+
+    @field_validator("knowledge_base_ids")
+    @classmethod
+    def distinct_knowledge(cls, value):
+        if value is not None and len(value) != len(set(value)):
+            raise ValueError("Duplicate knowledge bases")
+        return value
+
     agent_config_id: UUID
     content: str = Field(min_length=1, max_length=4000)
     idempotency_key: UUID
+    task: Literal["auto", "qa", "extraction", "reasoning"] = "auto"
 
 
 class AgentTurnOut(Output):
@@ -216,4 +228,5 @@ class AgentTurnOut(Output):
     answer: str = ""
     error_category: str | None = None
     executions: list[ExecutionOut] = Field(default_factory=list)
-    grounded: Literal[False] = False
+    grounded: bool = False
+    citations: list[Citation] = Field(default_factory=list)

@@ -7,6 +7,15 @@ from support_agent.errors import missing
 
 def get_owned(db, model, context, resource_id, *, lock=False, refresh=False):
     query = select(model).where(model.id == resource_id, model.tenant_id == context.tenant_id)
+    if context.public_session_id is not None:
+        if model.__tablename__ == "conversations":
+            query = query.where(model.id == context.conversation_id)
+        elif model.__tablename__ in {"model_calls", "tool_executions"}:
+            query = query.where(model.conversation_id == context.conversation_id)
+        elif model.__tablename__ == "agent_configs":
+            query = query.where(model.id == context.agent_config_id)
+        elif model.__tablename__ == "visitor_sessions":
+            query = query.where(model.id == context.public_session_id)
     if lock:
         query = query.with_for_update()
     if lock or refresh:

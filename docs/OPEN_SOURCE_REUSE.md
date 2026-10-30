@@ -66,3 +66,15 @@ P3 未移植新的第三方源码、未增加依赖。沿用前两阶段已审�
 按[官方 Chat Completions 协议](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)扩展现有 `providers.py`：原生 function tools、assistant.tool_calls、tool_call_id、拒绝、finish_reason 和逐步骤用量，不引入 SDK/Agent 框架。按 [JSON Schema 2020-12 验证规范](https://json-schema.org/draft/2020-12/json-schema-validation)继续使用成熟验证库，保留已有安全子集，不接受任意引用或扩展执行代码。协议和部署注册表由本项目实现，没有复制官方示例或上游实现。
 
 此前研究的 LangGraph 工具节点/循环、Sight 与 AgentDesk 的执行/来源边界只借鉴设计：采用服务端授权、明确状态、有界循环和结果关联；本阶段需求无需引入完整图运行时、工作流、外部网络工具协议或其全部基础设施。静态 `tool_runtime.py` 与持久执行服务是本项目实现，不从租户数据库加载 Python、Shell、SQL、模块路径或 URL。
+
+## P4 离线增量
+
+无新增第三方依赖、源码移植或提示词复制，继续使用上述库及原包许可证。本阶段实际查阅 [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling)、[API 错误分类](https://developers.openai.com/api/docs/guides/error-codes)、[PostgreSQL FTS](https://www.postgresql.org/docs/17/textsearch-controls.html) 和 [pg_trgm](https://www.postgresql.org/docs/17/pgtrgm.html) 官方文档；没有借此宣称任何具体模型已实测。
+
+采用协议中的工具往返关联和明确错误分类，落实 `providers.py`、`services/model_runtime.py` 的受配置能力/路由和有限降级。复用 PostgreSQL tsvector/GIN、事务 advisory lock、现有 ModelCall/FORCE RLS，落实中文词面召回与跨进程准入。实测原 simple FTS 三个中文问题无命中、英文基线有命中，选择生成二字组列、有限同义词和有界重排；未引入 pg_trgm 扩展（不需要额外相似度能力）、向量服务/Embedding（尚无必要性和真实质量证据）、大型路由/多 Agent SDK（现有适配器足够）。
+
+查询切分、通用同义词列表、预算/阶段记录、凭证变更交付检查及离线场景由本项目实现，不移植上游平台代码。部署级主密钥轮换只提供前置条件/恢复方案，未声称已实现或验证；源码来源与依赖许可证记录沿用且没有新增授权义务。
+
+## P5 产品化
+
+继续直接依赖既有 FastAPI/Starlette（StaticFiles、FileResponse、Cookie）、Pydantic、SQLAlchemy/Alembic/PostgreSQL、AES-GCM 和 JSON Schema；复用本项目 P1–P4 身份、RLS、检索、工具循环、审计与用量机制。前端使用浏览器原生 ES Modules、DOM、Fetch、Web Crypto 和有限会话存储，无运行/构建框架依赖。公开交付和前端为本项目实现，没有复制上述仓库源码或引入第三方网页模板/素材。Prettier 仅作为临时格式化工具使用，不成为项目依赖，也不分发其源码。原有依赖许可证记录不变，主密钥轮换没有因产品化伪装为已实现功能。

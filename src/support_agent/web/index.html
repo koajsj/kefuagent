@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>知应 · 通用客服工作台</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script type="module" src="/assets/app.js"></script>
+  </head>
+  <body>
+    <div id="announcements" role="status" aria-live="polite"></div>
+    <main id="login" class="login-layout">
+      <section class="login-intro">
+        <span class="wordmark">知应<span>SUPPORT AGENT</span></span>
+        <h1>让回答有依据，<br />让服务有记录。</h1>
+        <p>
+          独立的企业客服工作台。管理知识、配置助手，在同一处查看对话与执行记录。
+        </p>
+        <p class="note">
+          离线演示与真实模型明确区分。未配置模型时，也可以管理知识和验证平台流程。
+        </p>
+      </section>
+      <section class="login-form">
+        <h2>登录工作台</h2>
+        <p>使用平台管理员分配的账号。</p>
+        <form id="login-form">
+          <label
+            >登录账号<input
+              name="login"
+              autocomplete="username"
+              required
+              maxlength="160" /></label
+          ><label
+            >密码<input
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              required
+              maxlength="128" /></label
+          ><button type="submit" class="primary">登录</button>
+          <p id="login-error" role="alert"></p>
+        </form>
+        <details>
+          <summary>首次使用</summary>
+          <p>
+            在项目目录运行
+            <code>python -m support_agent.cli create-admin</code>
+            交互创建管理员。没有默认账号或密码。平台管理员登录后可创建企业及企业成员。
+          </p>
+        </details>
+      </section>
+    </main>
+    <div id="workspace" class="shell" hidden>
+      <aside class="sidebar">
+        <a class="wordmark" href="#chat">知应<span>SUPPORT AGENT</span></a
+        ><label class="tenant-label"
+          >当前企业<select id="tenant" aria-label="切换企业"></select
+        ></label>
+        <nav id="navigation" aria-label="主导航"></nav>
+        <div class="sidebar-footer">
+          <span id="identity"></span
+          ><button id="logout" class="quiet">退出登录</button
+          ><a href="/docs" target="_blank" rel="noopener">API 文档 ↗</a>
+        </div>
+      </aside>
+      <main class="canvas">
+        <div id="mode-banner" class="mode-banner"></div>
+        <div id="view" aria-live="polite"></div>
+      </main>
+    </div>
+    <noscript>此工作台需要 JavaScript。也可使用 /docs 访问 API 文档。</noscript>
+  </body>
+</html>

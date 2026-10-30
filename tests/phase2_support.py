@@ -12,6 +12,7 @@ def private_settings(monkeypatch, tmp_path):
 
     monkeypatch.setenv("CREDENTIAL_MASTER_KEY", base64.urlsafe_b64encode(os.urandom(32)).decode())
     monkeypatch.setenv("DOCUMENT_STORAGE_ROOT", str(tmp_path / "documents"))
+    monkeypatch.setenv("PUBLIC_RATE_KEY", "synthetic-public-test-rate-secret-" + uuid4().hex)
     monkeypatch.setenv("MODEL_ALLOWED_HOSTS", '["api.example.com"]')
 
 

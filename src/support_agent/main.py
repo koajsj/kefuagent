@@ -1,11 +1,13 @@
 import logging
 import re
 from contextlib import asynccontextmanager
-from uuid import uuid4
+from pathlib import Path
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
@@ -18,8 +20,10 @@ from support_agent.api import (
     identity,
     knowledge,
     model_access,
+    public_delivery,
     tenants,
     tools,
+    workspace,
 )
 from support_agent.config import Settings
 from support_agent.db import build_database, check_database
@@ -56,16 +60,23 @@ def create_app(settings: Settings | None = None):
 
     app = FastAPI(
         title="通用多租户客服平台",
-        version="0.3.0",
+        version="0.5.1",
         lifespan=lifespan,
         description="Tenant-scoped knowledge, verified-extract RAG and bounded, authorized read-only tool execution.",
-        responses={code: {"model": ErrorOut} for code in [401, 403, 404, 409, 413, 422, 500, 503]},
+        responses={
+            code: {"model": ErrorOut} for code in [401, 403, 404, 409, 413, 422, 429, 500, 503]
+        },
     )
     app.state.settings = settings
     app.state.engine = engine
     app.state.sessions = sessions
     app.state.storage = LocalDocumentStorage(settings.document_storage_root)
-    app.state.provider = OpenAICompatibleProvider(settings.model_allowed_hosts)
+    app.state.provider = OpenAICompatibleProvider(
+        settings.model_allowed_hosts, enabled=settings.allow_external_models
+    )
+    from support_agent.demo_provider import DemoProvider
+
+    app.state.demo_provider = DemoProvider()
     app.state.retriever = PostgresFTSRetriever()
     app.state.tool_registry = default_registry()
     app.state.tool_runner = ProcessToolRunner()
@@ -98,6 +109,14 @@ def create_app(settings: Settings | None = None):
             )
         response.headers["X-Request-ID"] = str(request.state.request_id)
         response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        if request.url.path == "/" or request.url.path.startswith(("/chat/", "/assets/")):
+            ancestors = "*" if request.url.path.startswith("/chat/") else "'none'"
+            response.headers["Content-Security-Policy"] = (
+                f"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors {ancestors}"
+            )
+
         route = request.scope.get("route")
         logger.info(
             "request id=%s method=%s route=%s status=%d",
@@ -170,7 +189,33 @@ def create_app(settings: Settings | None = None):
         db.execute(text("SELECT 1"))
         return {"status": "ok", "database": "ok"}
 
-    for module in [identity, tenants, agents, conversations, tools, audit, knowledge, model_access]:
+    for module in [
+        identity,
+        tenants,
+        agents,
+        conversations,
+        tools,
+        audit,
+        knowledge,
+        model_access,
+        workspace,
+        public_delivery,
+    ]:
         router.include_router(module.router)
     app.include_router(router)
+    web = Path(__file__).parent / "web"
+    app.mount("/assets", StaticFiles(directory=web), name="web-assets")
+
+    @app.get("/", include_in_schema=False)
+    def home():
+        return FileResponse(web / "index.html")
+
+    @app.get("/chat/{pid}", include_in_schema=False)
+    def public_chat(pid: UUID):
+        return FileResponse(web / "public.html")
+
+    @app.get("/widget.js", include_in_schema=False)
+    def widget():
+        return FileResponse(web / "widget.js", media_type="text/javascript")
+
     return app

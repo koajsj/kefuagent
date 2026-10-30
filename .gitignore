@@ -13,4 +13,10 @@ build/
 *.log
 *.pem
 *.key
+*.crt
+*.p12
+*.pfx
+*.p8
+*.dump
+.pgpass
 .DS_Store

@@ -113,12 +113,36 @@ class Conversation(Record, Timestamped, Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         CheckConstraint("status IN ('open','closed')", name="status"),
+        CheckConstraint(
+            "support_state IN ('ai','waiting','human','resolved')", name="support_state"
+        ),
         Index("ix_conversations_tenant_created", "tenant_id", "created_at", "id"),
     )
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     channel: Mapped[str] = mapped_column(String(40))
     status: Mapped[str] = mapped_column(String(16), default="open", server_default="open")
+    subject: Mapped[str] = mapped_column(String(160), default="新会话", server_default="新会话")
+    support_state: Mapped[str] = mapped_column(String(16), default="ai", server_default="ai")
+
+
+class AgentKnowledgeBase(Record, Base):
+    __tablename__ = "agent_knowledge_bases"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "agent_config_id", "knowledge_base_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "agent_config_id"], ["agent_configs.tenant_id", "agent_configs.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "knowledge_base_id"],
+            ["knowledge_bases.tenant_id", "knowledge_bases.id"],
+            ondelete="CASCADE",
+        ),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
+    agent_config_id: Mapped[UUID]
+    knowledge_base_id: Mapped[UUID]
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
 
 
 class Message(Record, Base):
@@ -246,6 +270,7 @@ class DocumentChunk(Record, Base):
         CheckConstraint("position >= 0 AND generation > 0", name="position"),
         CheckConstraint("page IS NULL OR page > 0", name="page"),
         Index("ix_document_chunks_search", "search_vector", postgresql_using="gin"),
+        Index("ix_document_chunks_chinese", "chinese_vector", postgresql_using="gin"),
     )
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
     document_id: Mapped[UUID]
@@ -256,6 +281,10 @@ class DocumentChunk(Record, Base):
     section: Mapped[str | None] = mapped_column(String(200))
     search_vector: Mapped[str] = mapped_column(
         TSVECTOR, Computed("to_tsvector('simple'::regconfig, content)", persisted=True)
+    )
+    chinese_vector: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('simple'::regconfig, support_cjk_bigrams(content))", persisted=True),
     )
 
 
@@ -271,7 +300,13 @@ class ModelCredential(Record, Timestamped, Base):
 
 class ModelCall(Record, Timestamped, Base):
     __tablename__ = "model_calls"
+    visitor_session_id: Mapped[UUID | None]
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "visitor_session_id"],
+            ["visitor_sessions.tenant_id", "visitor_sessions.id"],
+            name="fk_model_calls_visitor_session_id_visitor_sessions",
+        ),
         UniqueConstraint("tenant_id", "id", name="uq_model_calls_tenant_identity"),
         UniqueConstraint(
             "tenant_id", "conversation_id", "idempotency_key", name="uq_model_calls_idempotency"
@@ -318,6 +353,16 @@ class ModelCall(Record, Timestamped, Base):
     lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     result: Mapped[dict | None] = mapped_column(JSONB)
     steps: Mapped[list] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"))
+    phase: Mapped[str] = mapped_column(String(20), default="pending", server_default="pending")
+    reserved_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+    @property
+    def usage_complete(self):
+        return (
+            all(s.get("usage_complete", False) for s in self.steps)
+            if self.steps
+            else self.attempts == 0
+        )
 
 
 class AgentTool(Record, Timestamped, Base):
@@ -379,3 +424,58 @@ class ToolExecution(Record, Base):
     lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     elapsed_ms: Mapped[int | None] = mapped_column(Integer)
     result: Mapped[dict | None] = mapped_column(JSONB)
+
+
+class PublicRoute(Record, Base):
+    """Minimal public locator only; all delivery/configuration data stays behind RLS."""
+
+    __tablename__ = "public_routes"
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
+
+
+class Publication(Record, Timestamped, Base):
+    __tablename__ = "publications"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "agent_config_id"], ["agent_configs.tenant_id", "agent_configs.id"]
+        ),
+        CheckConstraint("version >= 1 AND agent_version >= 1", name="version"),
+    )
+    id: Mapped[UUID] = mapped_column(
+        ForeignKey("public_routes.id"), primary_key=True, default=uuid4
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
+    agent_config_id: Mapped[UUID]
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    name: Mapped[str] = mapped_column(String(120))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    agent_version: Mapped[int] = mapped_column(Integer)
+    public_tool_ids: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VisitorSession(Record, Base):
+    __tablename__ = "visitor_sessions"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_visitor_sessions_identity"),
+        UniqueConstraint("tenant_id", "conversation_id", name="uq_visitor_sessions_conversation"),
+        ForeignKeyConstraint(
+            ["tenant_id", "publication_id"], ["publications.tenant_id", "publications.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"], ["conversations.tenant_id", "conversations.id"]
+        ),
+        CheckConstraint("turn_count >= 0", name="turn_count"),
+        Index("ix_visitor_sessions_rate", "tenant_id", "publication_id", "ip_hash", "created_at"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
+    publication_id: Mapped[UUID]
+    publication_version: Mapped[int] = mapped_column(Integer)
+    conversation_id: Mapped[UUID]
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    ip_hash: Mapped[str] = mapped_column(String(64))
+    turn_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

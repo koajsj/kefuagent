@@ -117,7 +117,7 @@ def test_concurrent_delete_and_locked_row_refresh(platform, monkeypatch):
     kid = kb(c, a)
     did = upload(c, a, kid, "race.txt", b"Concurrent deletion evidence.").json()["id"]
     # A previously read ORM object must be refreshed after waiting for a row lock.
-    context = SimpleNamespace(tenant_id=UUID(ts[0]["id"]))
+    context = SimpleNamespace(tenant_id=UUID(ts[0]["id"]), public_session_id=None)
     with app.state.sessions() as first:
         set_tenant(first, context.tenant_id)
         old = first.get(Document, UUID(did))

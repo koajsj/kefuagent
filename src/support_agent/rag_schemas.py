@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_serializer, field_validator
 
 from support_agent.schemas import Input, Name, Output
 
@@ -72,7 +72,19 @@ class SearchHit(Output):
     page: int | None
     section: str | None
     generation: int
-    strategy: Literal["postgres_fts"] = "postgres_fts"
+    strategy: Literal["postgres_fts", "postgres_fts_cjk"] = "postgres_fts"
+
+
+class KnowledgeBindings(Input):
+    expected_version: int | None = Field(default=None, ge=1)
+    knowledge_base_ids: list[UUID] = Field(default_factory=list, max_length=10)
+
+    @field_validator("knowledge_base_ids")
+    @classmethod
+    def distinct(cls, value):
+        if len(set(value)) != len(value):
+            raise ValueError("Duplicate knowledge bases")
+        return value
 
 
 class ChatInput(Input):
@@ -80,6 +92,7 @@ class ChatInput(Input):
     knowledge_base_ids: list[UUID] = Field(min_length=1, max_length=10)
     content: str = Field(min_length=1, max_length=4000)
     idempotency_key: UUID
+    task: Literal["auto", "qa", "extraction", "reasoning"] = "auto"
 
     @field_validator("knowledge_base_ids")
     @classmethod
@@ -127,9 +140,42 @@ class CallOut(Output):
     elapsed_ms: int | None
     attempts: int | None
     steps: list[dict]
+    phase: str
+    reserved_tokens: int
+    usage_complete: bool
     cost: None = None
     created_at: datetime
     updated_at: datetime
+
+    @field_serializer("steps")
+    def public_steps(self, steps):
+        return [
+            {
+                key: value
+                for key, value in step.items()
+                if key not in {"credential_id", "credential_stamp"}
+            }
+            for step in steps
+        ]
+
+
+class ScopeLimits(Output):
+    requests_per_minute: int
+    concurrent_calls: int
+    daily_token_budget: int
+
+
+class ScopeUsage(Output):
+    requests_last_minute: int
+    active_calls: int
+    tokens_reserved_today: int
+
+
+class UsageLimitsOut(Output):
+    day_timezone: Literal["UTC"]
+    limits: dict[Literal["tenant", "user", "agent"], ScopeLimits]
+    tenant_usage: ScopeUsage
+    current_user_usage: ScopeUsage
 
 
 class SelectedQuote(Input):
@@ -140,3 +186,14 @@ class SelectedQuote(Input):
 class EvidenceSelection(Input):
     answerable: bool
     citations: list[SelectedQuote] = Field(default_factory=list, max_length=3)
+    conflict: bool = False
+
+
+class ChunkOut(Output):
+    id: UUID
+    document_id: UUID
+    position: int
+    generation: int
+    content: str
+    page: int | None
+    section: str | None

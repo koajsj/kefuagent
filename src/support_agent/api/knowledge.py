@@ -9,6 +9,7 @@ from support_agent.errors import AppError
 from support_agent.ingestion import MAX_FILE_BYTES
 from support_agent.models import Document, KnowledgeBase
 from support_agent.rag_schemas import (
+    ChunkOut,
     DocumentOut,
     KnowledgeCreate,
     KnowledgeOut,
@@ -145,3 +146,31 @@ def search(
     return request.app.state.retriever.search(
         db, context, [knowledge_base_id], data.query, data.limit
     )
+
+
+@router.get("/documents/{document_id}/chunks", response_model=list[ChunkOut])
+def chunks(
+    document_id: UUID,
+    db: Database,
+    context: TenantContext,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    from sqlalchemy import select
+
+    from support_agent.models import DocumentChunk
+
+    document = get_owned(db, Document, context, document_id)
+    if document.status != "ready":
+        return []
+    return db.scalars(
+        select(DocumentChunk)
+        .where(
+            DocumentChunk.tenant_id == context.tenant_id,
+            DocumentChunk.document_id == document.id,
+            DocumentChunk.generation == document.generation,
+        )
+        .order_by(DocumentChunk.position)
+        .limit(limit)
+        .offset(offset)
+    ).all()

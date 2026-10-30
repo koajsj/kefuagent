@@ -4,11 +4,18 @@ from fastapi import APIRouter, Query, Request
 
 from support_agent.dependencies import Database, TenantAdmin
 from support_agent.models import ModelCall, ModelCredential
-from support_agent.rag_schemas import CallOut, CredentialCreate, CredentialOut
+from support_agent.rag_schemas import CallOut, CredentialCreate, CredentialOut, UsageLimitsOut
 from support_agent.services import chat, model_configs
 from support_agent.services.resources import get_owned, list_owned
 
 router = APIRouter(tags=["Model access and usage"])
+
+
+@router.get("/usage-limits", response_model=UsageLimitsOut)
+def usage_limits(request: Request, db: Database, context: TenantAdmin):
+    from support_agent.services.limits import view
+
+    return view(db, context, request)
 
 
 @router.post("/model-credentials", response_model=CredentialOut, status_code=201)

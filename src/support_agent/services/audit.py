@@ -28,7 +28,12 @@ def record(
             request_id=request.state.request_id,
             outcome=outcome,
             reason=reason,
-            details=details or {},
+            details=(details or {})
+            | (
+                {"visitor_session_id": str(request.state.visitor_session_id)}
+                if getattr(request.state, "visitor_session_id", None)
+                else {}
+            ),
         )
     )
 

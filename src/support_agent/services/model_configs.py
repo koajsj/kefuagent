@@ -55,7 +55,15 @@ def delete_credential(db, context, credential_id, request):
     db.flush()
 
 
-def resolve_config(db, context, config, request):
+def resolve_config(db, context, config, request, *, snapshot=False):
+    if config.provider == "demo" and config.enabled:
+        kwargs = {
+            "base_url": "",
+            "api_key": "",
+            "model": config.model,
+            "runtime": RuntimeConfig.model_validate(config.runtime).model_dump(),
+        }
+        return (kwargs, None) if snapshot else kwargs
     if (
         config.provider != "openai_compatible"
         or not config.enabled
@@ -69,11 +77,14 @@ def resolve_config(db, context, config, request):
         )
     url = validate_base_url(config.base_url, request.app.state.settings.model_allowed_hosts)
     credential = db.scalar(
-        select(ModelCredential).where(
+        select(ModelCredential)
+        .where(
             ModelCredential.tenant_id == context.tenant_id,
             ModelCredential.ref == config.credential_ref,
             ModelCredential.enabled.is_(True),
         )
+        .with_for_update(read=True)
+        .execution_options(populate_existing=True)
     )
     if credential is None:
         raise AppError(
@@ -82,9 +93,10 @@ def resolve_config(db, context, config, request):
     secret = decrypt_secret(
         master_key(request), context.tenant_id, credential.ref, credential.encrypted_secret
     )
-    return {
+    kwargs = {
         "base_url": url,
         "api_key": secret,
         "model": config.model,
         "runtime": RuntimeConfig.model_validate(config.runtime).model_dump(),
     }
+    return (kwargs, (credential.id, credential.encrypted_secret)) if snapshot else kwargs

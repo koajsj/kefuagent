@@ -50,7 +50,28 @@ class ProviderFailure(Exception):
         super().__init__(category)
 
 
-def normalize_status(status):
+def normalize_status(status, body=b""):
+    try:
+        error = json.loads(body).get("error", {})
+        code, kind, parameter = (
+            error.get(key) if isinstance(error.get(key), str) else None
+            for key in ("code", "type", "param")
+        )
+    except (ValueError, AttributeError, TypeError):
+        code = kind = parameter = None
+    if status == 429 and (
+        {code, kind}
+        & {"insufficient_quota", "billing_hard_limit_reached", "organization_usage_limit_exceeded"}
+    ):
+        return "quota_exhausted"
+    if status == 404 and code in {"model_not_found", "model_not_available"}:
+        return "model_unavailable"
+    if (
+        status == 400
+        and code in {"unsupported_parameter", "unsupported_value"}
+        and parameter in {"tools", "tool_choice", "parallel_tool_calls"}
+    ):
+        return "tools_not_supported"
     if status in (401, 403):
         return "authentication_failed"
     if status == 429:
@@ -179,10 +200,13 @@ _PROVIDER_SLOTS = BoundedSemaphore(8)
 
 
 class OpenAICompatibleProvider:
-    def __init__(self, allowed_hosts):
+    def __init__(self, allowed_hosts, *, enabled=True):
         self.allowed_hosts = allowed_hosts
+        self.enabled = enabled
 
     def complete(self, **kwargs):
+        if not self.enabled:
+            raise ProviderFailure("external_models_disabled", attempts=0)
         if not _PROVIDER_SLOTS.acquire(blocking=False):
             raise ProviderFailure("provider_busy", attempts=0)
         try:
@@ -247,8 +271,12 @@ class OpenAICompatibleProvider:
             {
                 "model": model,
                 "messages": messages,
-                "temperature": runtime["temperature"],
-                "max_tokens": runtime["max_output_tokens"],
+                **(
+                    {"temperature": runtime["temperature"]}
+                    if runtime.get("send_temperature", True)
+                    else {}
+                ),
+                runtime.get("token_parameter", "max_tokens"): runtime["max_output_tokens"],
                 "stream": False,
                 **(
                     {"response_format": {"type": "json_object"}}
@@ -297,14 +325,23 @@ class OpenAICompatibleProvider:
                         },
                     ) as response:
                         if response.status != 200:
+                            error_body = b""
+                            for part in response.iter_stream():
+                                if time.monotonic() > deadline:
+                                    raise ProviderFailure("timeout", attempt)
+                                if len(error_body) + len(part) > 8192:
+                                    break
+                                error_body += part
+                            category = normalize_status(response.status, error_body)
                             if (
                                 response.status in (429, 502, 503, 504)
+                                and category != "quota_exhausted"
                                 and attempt == 1
                                 and deadline - time.monotonic() > 0.25
                             ):
                                 time.sleep(0.2)
                                 continue
-                            raise ProviderFailure(normalize_status(response.status), attempt)
+                            raise ProviderFailure(category, attempt)
                         parts = []
                         size = 0
                         for part in response.iter_stream():

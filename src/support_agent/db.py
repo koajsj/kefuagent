@@ -29,5 +29,5 @@ def check_database(engine) -> None:
         if any(role):
             raise RuntimeError("HTTP database role must be NOSUPERUSER NOBYPASSRLS")
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        if revision != "0005_execution_delivery":
+        if revision != "0008_public_delivery":
             raise RuntimeError("Database revision is not supported; run alembic upgrade head")

@@ -1,12 +1,30 @@
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
 
-from support_agent.dependencies import CurrentUser, Database, PlatformAdmin
+from support_agent.dependencies import CurrentUser, Database, PlatformAdmin, check_web_origin
 from support_agent.schemas import Login, TokenOut, UserCreate, UserOut, UserStatus
 from support_agent.services import identity
+from support_agent.workspace_schemas import BrowserSessionOut
 
 router = APIRouter(tags=["Identity"])
+
+
+@router.post("/web-session", response_model=BrowserSessionOut)
+def browser_login(data: Login, request: Request, db: Database, response: Response):
+    check_web_origin(request)
+    result = identity.login(db, data, request.app.state.settings, request)
+    response.set_cookie(
+        "support_session",
+        result["access_token"],
+        httponly=True,
+        samesite="strict",
+        secure=request.app.state.settings.web_origin.startswith("https://"),
+        path="/api/v1",
+        max_age=max(0, int((result["expires_at"] - datetime.now(UTC)).total_seconds())),
+    )
+    return {"expires_at": result["expires_at"]}
 
 
 @router.post("/auth/login", response_model=TokenOut)
@@ -23,7 +41,9 @@ def me(user: CurrentUser):
 @router.post("/auth/logout", status_code=204)
 def logout(request: Request, db: Database, user: CurrentUser):
     identity.logout(db, request.state.session_id, request)
-    return Response(status_code=204)
+    response = Response(status_code=204)
+    response.delete_cookie("support_session", path="/api/v1", httponly=True, samesite="strict")
+    return response
 
 
 @router.post("/users", response_model=UserOut, status_code=201)

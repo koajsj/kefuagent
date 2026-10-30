@@ -95,14 +95,33 @@ class MembershipOut(Output):
     updated_at: datetime
 
 
+class ModelTarget(Input):
+    model: str = Field(min_length=1, max_length=120, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$")
+    supports_tools: bool = True
+    token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+    send_temperature: bool = True
+
+
+class ModelRouting(Input):
+    qa: ModelTarget | None = None
+    extraction: ModelTarget | None = None
+    reasoning: ModelTarget | None = None
+    fallback: ModelTarget | None = None
+
+
 class RuntimeConfig(Input):
     temperature: float = Field(default=0.2, ge=0, le=2)
     max_output_tokens: int = Field(default=2048, ge=1, le=32768)
     timeout_seconds: int = Field(default=30, ge=1, le=120)
     max_input_tokens: int = Field(default=8192, ge=2048, le=32768)
+    routing: ModelRouting = Field(default_factory=ModelRouting)
+    supports_tools: bool = True
+    token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+    send_temperature: bool = True
 
 
 class BehaviorConfig(Input):
+    description: str = Field(default="", max_length=2000)
     instructions: str = Field(default="", max_length=12000)
     language: str = Field(default="auto", min_length=2, max_length=32, pattern=r"^[a-zA-Z-]+$")
 
@@ -134,6 +153,7 @@ class AgentOut(AgentCreate, Output):
 
 
 class ConversationCreate(Input):
+    subject: str = Field(default="新会话", min_length=1, max_length=160, pattern=r"\S")
     channel: str = Field(default="api", min_length=1, max_length=40, pattern=r"^[a-z][a-z0-9_-]*$")
 
 
@@ -141,7 +161,13 @@ class ConversationPatch(Input):
     status: Literal["open", "closed"]
 
 
+class ConversationHandling(Input):
+    state: Literal["ai", "waiting", "human", "resolved"]
+
+
 class ConversationOut(Output):
+    subject: str
+    support_state: Literal["ai", "waiting", "human", "resolved"]
     id: UUID
     tenant_id: UUID
     created_by: UUID

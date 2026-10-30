@@ -39,6 +39,12 @@ def bound_capability(tool, registry):
     return capability, None
 
 
+def public_tool_allowed(db, context, tool_id):
+    from support_agent.services.public_delivery import public_tool_allowed as allowed
+
+    return allowed(db, context, tool_id)
+
+
 def authorized_tools(db, context, config_id, registry):
     tools = db.scalars(
         select(ToolDefinition)
@@ -64,6 +70,7 @@ def authorized_tools(db, context, config_id, registry):
         tool
         for tool in tools
         if (context.role == "admin" or "tenant:admin" not in tool.permissions)
+        and (context.public_session_id is None or public_tool_allowed(db, context, tool.id))
         and bound_capability(tool, registry)[1] is None
     ]
 
@@ -178,6 +185,8 @@ def check_authorization(
         )
         .execution_options(populate_existing=True)
     )
+    if not lock and context.public_session_id is not None:
+        grant_query = grant_query.with_for_update(read=True)
     grant = db.scalar(grant_query.with_for_update() if lock else grant_query)
     if (
         not tool.enabled
@@ -186,6 +195,8 @@ def check_authorization(
         or ("tenant:admin" in tool.permissions and context.role != "admin")
     ):
         return None, "tool_not_authorized"
+    if context.public_session_id is not None and not public_tool_allowed(db, context, tool.id):
+        return None, "public_tool_denied"
     capability, reason = bound_capability(tool, registry)
     if reason:
         return None, reason
@@ -219,6 +230,14 @@ def ensure_delivery(db, context, call, rows, request):
             continue
         if row.delivery_error:
             raise AppError(409, row.delivery_error, "Tool payload delivery is no longer authorized")
+        if context.public_session_id is not None:
+            db.scalar(
+                select(ToolDefinition)
+                .where(
+                    ToolDefinition.id == row.tool_id, ToolDefinition.tenant_id == context.tenant_id
+                )
+                .with_for_update(read=True)
+            )
         tool = get_owned(db, ToolDefinition, context, row.tool_id, refresh=True)
         owner = (
             call
@@ -303,6 +322,7 @@ def invoke(db, context, call_id, model_tool_call, request, *, deadline=None):
         finish_execution(db, context, row, request, "denied", reason, elapsed=0)
         db.commit()
         return row
+    call.phase = "tool_running"
     audit_execution(db, context, row, request, "start")
     execution_id = row.id
     tool_context = replace(

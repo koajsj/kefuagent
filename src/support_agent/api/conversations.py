@@ -1,12 +1,14 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request
+from sqlalchemy import select
 
 from support_agent.dependencies import Database, TenantContext
-from support_agent.models import Conversation
-from support_agent.rag_schemas import ChatInput, ChatOut
+from support_agent.models import Conversation, ModelCall
+from support_agent.rag_schemas import CallOut, ChatInput, ChatOut
 from support_agent.schemas import (
     ConversationCreate,
+    ConversationHandling,
     ConversationOut,
     ConversationPatch,
     MessageCreate,
@@ -17,6 +19,19 @@ from support_agent.services.resources import get_owned, list_owned
 from support_agent.tool_protocol import AgentTurnInput, AgentTurnOut
 
 router = APIRouter(prefix="/conversations", tags=["Conversations and messages"])
+
+
+@router.get("/{conversation_id}/runs/{call_id}", response_model=CallOut)
+def run(
+    conversation_id: UUID, call_id: UUID, request: Request, db: Database, context: TenantContext
+):
+    from support_agent.errors import missing
+
+    get_owned(db, Conversation, context, conversation_id)
+    row = get_owned(db, ModelCall, context, call_id)
+    if row.conversation_id != conversation_id:
+        raise missing()
+    return chat.reconcile_expired(db, context, [row], request)[0]
 
 
 @router.post("", response_model=ConversationOut, status_code=201)
@@ -69,8 +84,9 @@ def history(
     context: TenantContext,
     limit: int = Query(100, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    newest: bool = False,
 ):
-    return conversations.history(db, context, conversation_id, limit, offset, request)
+    return conversations.history(db, context, conversation_id, limit, offset, request, newest)
 
 
 @router.post("/{conversation_id}/chat", response_model=ChatOut)
@@ -91,3 +107,36 @@ def agent_turn(
     from support_agent.services.agent_turns import turn
 
     return turn(db, context, conversation_id, data, request)
+
+
+@router.get("/{conversation_id}/calls", response_model=list[CallOut])
+def conversation_calls(
+    conversation_id: UUID,
+    request: Request,
+    db: Database,
+    context: TenantContext,
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    get_owned(db, Conversation, context, conversation_id)
+    rows = db.scalars(
+        select(ModelCall)
+        .where(
+            ModelCall.tenant_id == context.tenant_id, ModelCall.conversation_id == conversation_id
+        )
+        .order_by(ModelCall.created_at.desc(), ModelCall.id.desc())
+        .limit(limit)
+        .offset(offset)
+    ).all()
+    return chat.reconcile_expired(db, context, rows, request)
+
+
+@router.post("/{conversation_id}/handling", response_model=ConversationOut)
+def handling(
+    conversation_id: UUID,
+    data: ConversationHandling,
+    request: Request,
+    db: Database,
+    context: TenantContext,
+):
+    return conversations.set_handling(db, context, conversation_id, data, request)

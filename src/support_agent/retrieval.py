@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 
 from support_agent.models import Document, DocumentChunk, KnowledgeBase
 from support_agent.rag_schemas import SearchHit
+from support_agent.search_text import HAN, coverage, query_expression, query_groups
 from support_agent.services.knowledge import active_base
 
 _INJECTION = re.compile(
@@ -30,8 +31,18 @@ class PostgresFTSRetriever:
     def search(self, db, context, knowledge_base_ids, query, limit=6):
         for kid in knowledge_base_ids:
             active_base(db, context, kid)
-        tsquery = func.plainto_tsquery("simple", query)
-        score = func.ts_rank_cd(DocumentChunk.search_vector, tsquery, 32)
+        chinese = bool(HAN.search(query))
+        groups = query_groups(query) if chinese else []
+        expression = query_expression(groups)
+        if chinese and not expression:
+            return []
+        tsquery = (
+            func.to_tsquery("simple", expression)
+            if chinese
+            else func.plainto_tsquery("simple", query)
+        )
+        vector = DocumentChunk.chinese_vector if chinese else DocumentChunk.search_vector
+        score = func.ts_rank_cd(vector, tsquery, 32)
         rows = db.execute(
             select(DocumentChunk, Document.filename, score.label("score"))
             .join(
@@ -52,12 +63,17 @@ class PostgresFTSRetriever:
                 Document.status == "ready",
                 KnowledgeBase.status == "active",
                 DocumentChunk.generation == Document.generation,
-                DocumentChunk.search_vector.op("@@")(tsquery),
+                vector.op("@@")(tsquery),
                 score >= 0.001,
             )
             .order_by(score.desc(), DocumentChunk.id)
-            .limit(limit)
+            .limit(min(60, limit * 6) if chinese else limit)
         ).all()
+        if chinese:
+            rows = [(chunk, name, coverage(chunk.content, groups)) for chunk, name, _ in rows]
+            rows = sorted(
+                (row for row in rows if row[2] >= 0.4), key=lambda row: (-row[2], str(row[0].id))
+            )
         return [
             SearchHit(
                 document_id=chunk.document_id,
@@ -68,12 +84,30 @@ class PostgresFTSRetriever:
                 page=chunk.page,
                 section=chunk.section,
                 generation=chunk.generation,
+                strategy="postgres_fts_cjk" if chinese else "postgres_fts",
             )
             for chunk, name, rank in rows
             if reference_is_safe(chunk.content)
-        ]
+        ][:limit]
 
     def current_chunks(self, db, context, chunk_ids, *, lock=False):
+        if lock and context.public_session_id is not None:
+            # Follow deletion's KB -> document order; protect publication history delivery.
+            bases = (
+                select(Document.knowledge_base_id)
+                .join(DocumentChunk, DocumentChunk.document_id == Document.id)
+                .where(
+                    Document.tenant_id == context.tenant_id,
+                    DocumentChunk.tenant_id == context.tenant_id,
+                    DocumentChunk.id.in_(chunk_ids),
+                )
+            )
+            db.scalars(
+                select(KnowledgeBase)
+                .where(KnowledgeBase.tenant_id == context.tenant_id, KnowledgeBase.id.in_(bases))
+                .order_by(KnowledgeBase.id)
+                .with_for_update(read=True)
+            ).all()
         stmt = (
             select(DocumentChunk, Document)
             .join(

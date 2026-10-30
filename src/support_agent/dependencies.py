@@ -34,11 +34,16 @@ def current_user(
     db: Database,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ):
-    if not credentials or len(credentials.credentials) > 256:
+    raw = credentials.credentials if credentials else None
+    if credentials is None and "authorization" not in request.headers:
+        raw = request.cookies.get("support_session")
+        if raw and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            check_web_origin(request)
+    if not raw or len(raw) > 256:
         raise AppError(401, "authentication_required", "A valid bearer session is required")
     session = db.scalar(
         select(AuthSession).where(
-            AuthSession.token_hash == token_digest(credentials.credentials),
+            AuthSession.token_hash == token_digest(raw),
             AuthSession.revoked_at.is_(None),
             AuthSession.expires_at > datetime.now(UTC),
         )
@@ -49,6 +54,11 @@ def current_user(
     request.state.actor_id = user.id
     request.state.session_id = session.id
     return user
+
+
+def check_web_origin(request):
+    if request.headers.get("origin") != request.app.state.settings.web_origin:
+        raise AppError(403, "origin_denied", "Use the configured same-origin Web application")
 
 
 CurrentUser = Annotated[User, Depends(current_user)]
@@ -105,6 +115,12 @@ def resume_context(db, context, request, *, admin=False):
     """Revalidate after an explicit transaction boundary, then restore transaction-local RLS."""
     from dataclasses import replace
 
+    if context.public_session_id is not None:
+        from support_agent.services.public_delivery import resume_visitor
+
+        if admin:
+            raise forbidden()
+        return resume_visitor(db, context, request)
     user = db.get(User, context.user_id, populate_existing=True)
     auth = db.get(AuthSession, request.state.session_id, populate_existing=True)
     link = db.scalar(
