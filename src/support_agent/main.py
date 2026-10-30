@@ -1,0 +1,176 @@
+import logging
+import re
+from contextlib import asynccontextmanager
+from uuid import uuid4
+
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException
+
+from support_agent.api import (
+    agents,
+    audit,
+    conversations,
+    identity,
+    knowledge,
+    model_access,
+    tenants,
+    tools,
+)
+from support_agent.config import Settings
+from support_agent.db import build_database, check_database
+from support_agent.dependencies import Database
+from support_agent.errors import AppError
+from support_agent.providers import OpenAICompatibleProvider
+from support_agent.retrieval import PostgresFTSRetriever
+from support_agent.schemas import ErrorOut
+from support_agent.services.audit import record_failure
+from support_agent.storage import LocalDocumentStorage
+from support_agent.tool_runtime import ProcessToolRunner, default_registry
+
+logger = logging.getLogger("support_agent")
+
+
+def create_app(settings: Settings | None = None):
+    settings = settings or Settings()
+    engine, sessions = build_database(settings)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        # A missing or unsafe database is a startup failure, never silent SQLite fallback.
+        try:
+            await run_in_threadpool(check_database, engine)
+        except (SQLAlchemyError, RuntimeError):
+            engine.dispose()
+            raise RuntimeError(
+                "Database unavailable, unsafe role or pending migration; check local setup"
+            ) from None
+        try:
+            yield
+        finally:
+            engine.dispose()
+
+    app = FastAPI(
+        title="通用多租户客服平台",
+        version="0.3.0",
+        lifespan=lifespan,
+        description="Tenant-scoped knowledge, verified-extract RAG and bounded, authorized read-only tool execution.",
+        responses={code: {"model": ErrorOut} for code in [401, 403, 404, 409, 413, 422, 500, 503]},
+    )
+    app.state.settings = settings
+    app.state.engine = engine
+    app.state.sessions = sessions
+    app.state.storage = LocalDocumentStorage(settings.document_storage_root)
+    app.state.provider = OpenAICompatibleProvider(settings.model_allowed_hosts)
+    app.state.retriever = PostgresFTSRetriever()
+    app.state.tool_registry = default_registry()
+    app.state.tool_runner = ProcessToolRunner()
+
+    @app.middleware("http")
+    async def trace(request: Request, call_next):
+        request.state.request_id = uuid4()
+        upload_path = request.method == "POST" and re.fullmatch(
+            r"/api/v1/knowledge-bases/[0-9a-fA-F-]{36}/documents", request.url.path
+        )
+        limit = 5 * 1024 * 1024 + 65536 if upload_path else 131072
+        size = 0
+        parts = []
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > limit:
+                return await error_response(
+                    request, 413, "request_too_large", "Request body exceeds the route size limit"
+                )
+            parts.append(chunk)
+        # Starlette's cached Request body is reused by call_next; no second read or logging.
+        request._body = b"".join(parts)
+        try:
+            response = await call_next(request)
+        except Exception:
+            # This boundary prevents ASGI server traceback logging of arbitrary exception values.
+            logger.error("unexpected error request_id=%s", request.state.request_id)
+            response = await error_response(
+                request, 500, "internal_error", "Unexpected server error"
+            )
+        response.headers["X-Request-ID"] = str(request.state.request_id)
+        response.headers["Cache-Control"] = "no-store"
+        route = request.scope.get("route")
+        logger.info(
+            "request id=%s method=%s route=%s status=%d",
+            request.state.request_id,
+            request.method,
+            getattr(route, "path", "unmatched"),
+            response.status_code,
+        )
+        return response
+
+    async def error_response(request, status, code, message):
+        if not getattr(request.state, "audit_handled", False) and (
+            request.method in {"POST", "PUT", "PATCH", "DELETE"} or status in {401, 403}
+        ):
+
+            def write_failure():
+                try:
+                    with sessions.begin() as db:
+                        record_failure(db, request, code)
+                except SQLAlchemyError:
+                    logger.error("audit unavailable request_id=%s", request.state.request_id)
+
+            await run_in_threadpool(write_failure)
+        return JSONResponse(
+            status_code=status,
+            content={
+                "error": {"code": code, "message": message},
+                "request_id": str(request.state.request_id),
+            },
+            headers={
+                "X-Request-ID": str(request.state.request_id),
+                **({"WWW-Authenticate": "Bearer"} if status == 401 else {}),
+            },
+        )
+
+    @app.exception_handler(AppError)
+    async def domain_error(request, exc):
+        return await error_response(request, exc.status, exc.code, exc.message)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, exc):
+        # No Pydantic `input`, `ctx`, field names or values that may contain secrets.
+        return await error_response(request, 422, "validation_error", "Request validation failed")
+
+    @app.exception_handler(IntegrityError)
+    async def integrity_error(request, exc):
+        return await error_response(
+            request,
+            409,
+            "resource_conflict",
+            "Resource conflicts with existing data or relationships",
+        )
+
+    @app.exception_handler(SQLAlchemyError)
+    async def database_error(request, exc):
+        return await error_response(
+            request, 503, "database_unavailable", "Database operation unavailable; retry later"
+        )
+
+    @app.exception_handler(HTTPException)
+    async def http_error(request, exc):
+        return await error_response(
+            request, exc.status_code, "http_error", "Request cannot be processed"
+        )
+
+    router = APIRouter(prefix="/api/v1")
+
+    @router.get("/health", tags=["Health"])
+    def health(db: Database):
+        db.execute(text("SELECT 1"))
+        return {"status": "ok", "database": "ok"}
+
+    for module in [identity, tenants, agents, conversations, tools, audit, knowledge, model_access]:
+        router.include_router(module.router)
+    app.include_router(router)
+    return app
