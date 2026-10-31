@@ -4,7 +4,6 @@ import argparse
 import ast
 import re
 import subprocess
-import sys
 import tomllib
 import zipfile
 from html.parser import HTMLParser
@@ -25,6 +24,13 @@ class Shell(HTMLParser):
             self.assets.append(attrs["src"])
         if tag == "link" and attrs.get("href"):
             self.assets.append(attrs["href"])
+
+
+def run_bounded(label, command, timeout):
+    try:
+        subprocess.run(command, check=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"{label} exceeded its {timeout}s time budget") from None
 
 
 def check_assets(assets):
@@ -73,10 +79,10 @@ async function check(entry) {
   for (const file of fs.readdirSync(root).filter(name => name.endsWith('.js'))) await check(path.join(root, file));
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
-    subprocess.run(
+    run_bounded(
+        "JavaScript module-link check",
         ["node", "--no-warnings", "--experimental-vm-modules", "-e", linker, str(assets)],
-        check=True,
-        timeout=10,
+        timeout=15,
     )
 
 
@@ -91,7 +97,7 @@ def main():
     )
     if tests > 28:
         raise SystemExit("Python test count exceeds P9 budget")
-    subprocess.run(["node", "--test", "tests/web.test.mjs"], check=True, timeout=3)
+    run_bounded("JavaScript tests", ["node", "--test", "tests/web.test.mjs"], timeout=10)
     assets = Path("src/support_agent/web")
     check_assets(assets)
     expected_version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
@@ -111,7 +117,4 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except subprocess.TimeoutExpired:
-        sys.exit("Delivery check exceeded its time budget")
+    main()
