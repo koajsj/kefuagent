@@ -42,7 +42,7 @@ export class StaleResponse extends Error {
     this.name = "StaleResponse";
   }
 }
-export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
+export function createClient() {
   let tenant = "",
     generation = 0,
     unauthorized = () => {};
@@ -69,7 +69,7 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
         body = JSON.stringify(body);
       }
       try {
-        const response = await fetcher("/api/v1" + path, {
+        const response = await globalThis.fetch("/api/v1" + path, {
           ...options,
           body,
           headers,

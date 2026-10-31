@@ -2,14 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Protocol
 from uuid import UUID
-
-
-class DocumentStorage(Protocol):
-    def write(self, tenant_id, document_id, content: bytes) -> None: ...
-    def read(self, tenant_id, document_id) -> bytes: ...
-    def delete(self, tenant_id, document_id) -> None: ...
 
 
 class LocalDocumentStorage:

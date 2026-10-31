@@ -32,7 +32,6 @@ export async function chatPage(ctx) {
   let selected = null,
     offset = 0,
     historyOffset = 0,
-    stopPoll = () => {},
     busy = false,
     openEpoch = 0;
   const [agents, operators] = await Promise.all([ctx.api("/agent-configs?limit=100"), ctx.api("/workspace/operators")]);
@@ -40,7 +39,6 @@ export async function chatPage(ctx) {
   const list = el("div", { class: "panel flush conversation-list" }),
     main = el("section", { class: "chat-main" });
   const listPager = el("div");
-  ctx.onLeave(() => stopPoll());
   const showError = (error) => {
     if (
       ctx.isCurrent() &&
@@ -97,7 +95,6 @@ export async function chatPage(ctx) {
       return;
     }
     const ticket = ++openEpoch;
-    stopPoll();
     const next = await ctx.api("/conversations/" + row.id);
     if (ticket !== openEpoch) return;
     selected = next;
@@ -273,7 +270,6 @@ export async function chatPage(ctx) {
       inline.replaceChildren();
       runState.textContent = "正在提交…";
       const keyName = "support.pending." + ctx.tenant + "." + cid;
-      stopPoll = () => {};
       try {
         if (human) {
           await ctx.api(`/conversations/${cid}/messages`, {
@@ -357,7 +353,6 @@ export async function chatPage(ctx) {
             ),
           );
       } finally {
-        stopPoll();
         busy = false;
         if (ctx.isCurrent() && selected?.id === cid && ticket === openEpoch) {
           try {

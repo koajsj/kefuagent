@@ -72,8 +72,8 @@ uv run python -m support_agent.cli retention execute --tenant TENANT_UUID --conv
 
 这是业务保留与删除工具，**不是完整隐私擦除**。全局用户身份、审计、保留摘要、备份、远端模型留存及导出副本需分别治理；旧备份恢复后还需重放撤销/删除。尚无自动合规判断或全链路擦除证明。
 
-## CI
+## CI 与静态检查
 
-`.github/workflows/ci.yml` 在 main push、PR 或手动触发。固定 Actions 提交，contents:read，不保留 Git 凭证；全新 PostgreSQL17 service、非超级/非 BYPASSRLS 应用角色，执行现有迁移链（当前 0001–0009）再复用 scripts/check.py。没有个人路径、真实 Key 或外部模型；服务和模拟密码仅用于短暂 CI。
+`.github/workflows/ci.yml` 在 main push、PR 或手动触发。CI 使用全新短暂 PostgreSQL 17 数据库、非超级/非 BYPASSRLS 应用角色，并显式执行 0001–0010 迁移；不配置 `TEST_DATABASE_URL`。随后运行静态检查和该数据库的 Alembic schema 差异检查。没有个人路径、真实 Key 或外部模型。
 
-P9 当前 CI：uv 锁定依赖，Python3.13、Ruff/格式、不同目标库的 schema diff、28 项 Python 原子回归只执行一次，输出最慢 10 项。随后执行 wheel 打包、3 项 JS、JS 模块语法/链接、HTML 锚点及全部 Web 资源/许可证检查。检查脚本及离线检索评测不设置子进程硬超时，按实际退出码判断结果；工作流整体 3 分钟安全限制与 PostgreSQL 健康检查仍保留，不上传环境、日志或数据制品。Node 使用 runner 自带版本；无前端构建框架。历史 Actions 结果记录在 P7_ACCEPTANCE，本次修改未验证远端 CI，不以 YAML 存在代替运行通过。应用的 Provider、工具、解析、数据库及 Agent/SSE 运行时超时不受此调整影响。
+`uv run python scripts/check.py` 检查 Ruff、格式、Python AST 和迁移链等静态结构；仅在全新隔离 CI 数据库显式设置 `DATABASE_URL` 后加 `--database` 检查数据库 schema，检查本身不会迁移。先用 `uv build --wheel --out-dir .local/dist` 构建 wheel，再用 `uv run python scripts/check_delivery.py --wheel .local/dist/具体文件.whl` 检查 Node 语法、模块、DOM、资源、wheel MIT 许可证及 Markdown/敏感内容。两者均不运行 Python 或 JavaScript 测试；静态检查不能证明运行时行为。历史 Actions 与阶段结果见各验收记录，不能视为当前远端 CI 通过。

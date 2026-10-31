@@ -23,7 +23,6 @@ export async function readEvents(response, onEvent = () => {}) {
         if (!data.length) continue;
         const payload = JSON.parse(data.join("\n"));
         if (["failed", "timed_out"].includes(event)) {
-          onEvent("discard", {});
           const error = new Error("调用失败或结果未知：" + (payload.error_category || event));
           error.code = payload.error_category || event;
           throw error;

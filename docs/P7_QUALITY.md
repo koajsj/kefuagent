@@ -1,17 +1,27 @@
 # 离线质量评测与检索
 
-数据集 `tests/fixtures/customer_quality.json` v2 保留 18 场景的预期行为、相关性及人工评估依据。P9 删除重复的 Oracle 回答/工具/错误模拟矩阵；当前自动评测仅执行 Q02（中文同义）、Q17（英文同义）、Q18（中英混合）三个真实 PostgreSQL 文档排名探针。其他场景保留作人工评估输入，不在其他脚本隐藏运行。
+数据集 `data/customer_quality.json` v2 保留 18 场景的预期行为、相关性及人工评估依据。离线评测使用已有 PostgreSQL 知识库，只评估 manifest 选中且数据集有相关性标注的场景；其他场景仍可作为人工评估输入，不调用模型。
 
 ```bash
-uv run python scripts/evaluate_quality.py
-uv run python scripts/evaluate_quality.py --compare .local/evaluations/OLD_REPORT.json
+uv run python scripts/evaluate_quality.py --tenant-id TENANT_UUID --user-id USER_UUID --manifest MANIFEST.json
+uv run python scripts/evaluate_quality.py --tenant-id TENANT_UUID --user-id USER_UUID --manifest MANIFEST.json --compare .local/evaluations/OLD_REPORT.json
 ```
 
-输出独立 JSON/Markdown，不覆盖已有报告。CLI 需要开发依赖和独立 TEST_DATABASE_URL（本机 dev 可自动定位 test），只追加随机合成企业；无模型调用。Recall@6 / MRR / nDCG@6 按唯一文档及标注等级计算，空相关性为 N/A。仅记录三项召回、排名及检索耗时，不输出模拟 Token、回答/引用/工具成功率，不能作为 AI 客服质量验收。
+先向该企业知识库导入评测文档，并准备 manifest：按场景 ID 指定 `knowledge_base_ids`，并用 `documents` 将数据集中的资料索引（例如 `"0"`）映射到已导入文档 UUID。可用 `--dataset` 指定数据集（默认 `data/customer_quality.json`），`--output` 指定输出目录。显式配置 `DATABASE_URL` 为运行角色，角色不得为 SUPERUSER 或 BYPASSRLS；企业、用户及成员关系须处于活动状态。评测在只读事务中检索，不自动导入文档或创建企业，不执行测试或阈值断言。
 
-JSON 包含数据集版本及 SHA-256、`retrieval-only-v3` 配置、`none-no-model` Prompt 标识和每例检索结果。只有数据集、配置、Prompt 一致才计算差值，因此不与 P7 的完整 Oracle 报告直接比较；历史证据按原阶段保留。
+manifest 示例（用已有资源 UUID 替换占位符）：
 
-## 本次结果与限制
+```json
+{"Q02": {"knowledge_base_ids": ["KNOWLEDGE_BASE_UUID"], "documents": {"0": "DOCUMENT_UUID"}}}
+```
+
+这是受信任本机操作员 CLI，用户 UUID 仅用于校验成员范围，不是公开认证接口。报告还保存企业和 manifest 的范围摘要；只有数据集、配置、Prompt 和范围摘要一致时才比较指标。
+
+输出独立 JSON/Markdown，不覆盖已有报告。Recall@6 / MRR / nDCG@6 按唯一文档及标注等级计算，空相关性为 N/A；检索指标不能作为 AI 客服质量验收。
+
+JSON 包含数据集版本及 SHA-256、检索配置、`none-no-model` Prompt 标识和每例检索结果。只有可比较的报告才计算差值，因此不与 P7 的完整 Oracle 报告直接比较；历史证据按原阶段保留。
+
+## P7 历史结果与限制
 
 2026-10-31，同一 v2 数据集、配置与 Prompt，对改动前 P6 检索和 P7 检索各执行一次：
 

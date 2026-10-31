@@ -17,16 +17,11 @@ with psycopg.connect(
             sql.Literal(password)
         )
     )
-    for name in ["support_agent_dev", "support_agent_test"]:
-        db.execute(sql.SQL("CREATE DATABASE {} OWNER support_app").format(sql.Identifier(name)))
-        db.execute(
-            sql.SQL("REVOKE CONNECT ON DATABASE {} FROM PUBLIC").format(sql.Identifier(name))
-        )
-        db.execute(
-            sql.SQL("GRANT CONNECT ON DATABASE {} TO support_app").format(sql.Identifier(name))
-        )
+    db.execute("CREATE DATABASE support_agent_dev OWNER support_app")
+    db.execute("REVOKE CONNECT ON DATABASE support_agent_dev FROM PUBLIC")
+    db.execute("GRANT CONNECT ON DATABASE support_agent_dev TO support_app")
 url = f"postgresql+psycopg://support_app:{password}@127.0.0.1:{port}/support_agent_dev"
 fd = os.open(".env", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
 with os.fdopen(fd, "w") as stream:
     stream.write(f"DATABASE_URL={url}\nSESSION_HOURS=12\n")
-print("Created dedicated dev/test databases and private .env (0600); no users seeded.")
+print("Created dedicated dev database and private .env (0600); no users seeded.")

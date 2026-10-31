@@ -24,7 +24,7 @@
   <a href="#-documentation">Documentation</a>
 </p>
 
-<sub>v0.7.1 · P9 Quality Governance · Modular Monolith</sub>
+<sub>v0.7.1 · P11 · Modular Monolith</sub>
 
 </div>
 
@@ -129,7 +129,7 @@ cd kefuagent
 
 uv sync --locked
 
-# 仅限全新安装：创建本项目独立 PostgreSQL dev/test 库并生成私有 .env
+# 仅限全新安装：创建本项目独立 PostgreSQL dev 库并生成私有 .env
 ./scripts/local-postgres.sh init
 
 # 显式执行数据库迁移
@@ -179,6 +179,10 @@ uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8
 - 客服工作台支持企业内部协作与人工接管；不是完整的全渠道客服系统。
 - 真实模型与摘要语义质量、浏览器 GUI、Docker 实际运行及生产部署尚未完成验收。
 
+## 🔍 Checks
+
+`uv run python scripts/check.py` 执行 Ruff、格式、Python AST 和迁移链等静态检查；仅在全新隔离 CI 数据库检查 schema 时，显式设置目标 `DATABASE_URL` 并运行 `uv run python scripts/check.py --database`。该选项执行只读 Alembic 差异检查，不执行迁移。先用 `uv build --wheel --out-dir .local/dist` 构建 wheel，再用 `uv run python scripts/check_delivery.py --wheel .local/dist/具体文件.whl` 检查 JavaScript、HTML、资源、wheel 许可证及文档；这些检查不运行测试，也不能替代运行时验收。
+
 ## 📚 Documentation
 
 | Document | Description |
@@ -191,6 +195,7 @@ uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8
 | [P8 Acceptance](docs/P8_ACCEPTANCE.md) | 客服运营、会话记忆与分析验收 |
 | [P8 Compose](docs/P8_DEPLOYMENT.md) | 可选 Docker Compose 方案及限制 |
 | [P9 Quality Governance](docs/P9_ACCEPTANCE.md) | 测试精简、静态审查与验收记录 |
+| [P11 清理与边界](docs/P11_ACCEPTANCE.md) | 自动化测试移除、静态交付与未验收项 |
 | [Dependency Licenses](docs/DEPENDENCY_LICENSES.md) | 第三方依赖许可证 |
 
 ## 🧭 Project Principles

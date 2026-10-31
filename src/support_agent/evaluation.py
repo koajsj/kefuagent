@@ -41,14 +41,20 @@ def markdown(report, previous=None):
         f"数据集：{report['dataset_version']}；模式：{report['mode']}；非真实模型评测。",
         f"配置：{report['config_version']}；Prompt：{report['prompt_version']}。",
         "",
-        "仅验证三项离线文档召回与排名；回答、引用、工具、Token 用量、语义及真实模型：NOT_EVALUATED。",
+        "仅评测所选场景的离线文档召回与排名；回答、引用、工具、Token 用量、语义及真实模型：NOT_EVALUATED。",
         "",
         "| 指标 | 当前值 | 较前次变化 |",
         "| --- | --- | --- |",
     ]
     comparable = previous and all(
         previous.get(key) == report.get(key)
-        for key in ("dataset_version", "dataset_sha256", "config_version", "prompt_version")
+        for key in (
+            "dataset_version",
+            "dataset_sha256",
+            "config_version",
+            "prompt_version",
+            "scope_sha256",
+        )
     )
     for key, value in report["metrics"].items():
         old = previous.get("metrics", {}).get(key) if comparable else None

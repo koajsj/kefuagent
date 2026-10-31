@@ -1,5 +1,4 @@
 import re
-from typing import Protocol
 
 from sqlalchemy import func, select
 
@@ -21,10 +20,6 @@ _INJECTION = re.compile(
 def reference_is_safe(content):
     # Conservative known-pattern screen, not a general prompt-injection classifier.
     return not _INJECTION.search(content)
-
-
-class Retriever(Protocol):
-    def search(self, db, context, knowledge_base_ids, query, limit=6) -> list[SearchHit]: ...
 
 
 class PostgresFTSRetriever:

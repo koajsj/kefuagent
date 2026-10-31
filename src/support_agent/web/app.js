@@ -26,7 +26,6 @@ let user = null,
   role = "",
   tenants = [],
   epoch = 0,
-  cleanup = () => {},
   noticeTimer;
 const pages = {
   dashboard: ["工作区概览", dashboardPage],
@@ -48,8 +47,6 @@ function notify(text) {
   noticeTimer = setTimeout(() => box.replaceChildren(), 6000);
 }
 function loggedOut() {
-  cleanup();
-  cleanup = () => {};
   epoch++;
   client.setTenant("");
   user = null;
@@ -84,8 +81,6 @@ function navigation() {
   }
 }
 async function chooseTenant(id) {
-  cleanup();
-  cleanup = () => {};
   client.setTenant(id);
   tenant = id;
   role = "";
@@ -138,8 +133,6 @@ async function signedIn() {
 }
 async function render() {
   if (!user) return;
-  cleanup();
-  cleanup = () => {};
   const current = ++epoch;
   client.setTenant(tenant);
   const key = location.hash.slice(1) || "chat";
@@ -188,10 +181,6 @@ async function render() {
     },
     navigate: (next) => {
       if (current === epoch) location.hash = next;
-    },
-    onLeave: (fn) => {
-      if (current === epoch) cleanup = fn;
-      else fn();
     },
     refreshTenants: async () => {
       if (current === epoch) await signedIn();
