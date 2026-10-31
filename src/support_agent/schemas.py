@@ -163,9 +163,21 @@ class ConversationPatch(Input):
 
 class ConversationHandling(Input):
     state: Literal["ai", "waiting", "human", "resolved"]
+    expected_version: int | None = Field(default=None, ge=1)
 
 
 class ConversationOut(Output):
+    assignee_id: UUID | None
+    priority: Literal["low", "normal", "high", "urgent"]
+    tags: list[str]
+    category: str
+    version: int
+    first_response_at: datetime | None
+    waiting_since: datetime | None
+    human_started_at: datetime | None
+    resolved_at: datetime | None
+    ever_human: bool
+    sla: dict
     subject: str
     support_state: Literal["ai", "waiting", "human", "resolved"]
     id: UUID

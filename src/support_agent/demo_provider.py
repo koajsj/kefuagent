@@ -13,6 +13,26 @@ class DemoProvider:
             payload = json.loads(user)
         except (ValueError, TypeError):
             payload = {}
+        if "Compress conversation USER DATA" in messages[0]["content"]:
+            return Completion(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "message_id": row["message_id"],
+                                "quote": row["content"][:150],
+                                "kind": "request",
+                            }
+                            for row in payload.get("messages", [])[-8:]
+                            if row["content"]
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                0,
+                0,
+                0,
+            )
         question = payload.get("question", "")
         if tools is not None and messages[-1]["role"] != "tool" and "统计" in question:
             if any(t["function"]["name"] == "text_metrics" for t in tools):

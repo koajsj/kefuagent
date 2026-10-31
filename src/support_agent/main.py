@@ -63,7 +63,7 @@ def create_app(settings: Settings | None = None):
 
     app = FastAPI(
         title="通用多租户客服平台",
-        version="0.6.0",
+        version="0.7.0",
         lifespan=lifespan,
         description="Tenant-scoped knowledge, verified-extract RAG and bounded, authorized read-only tool execution.",
         responses={
@@ -192,6 +192,29 @@ def create_app(settings: Settings | None = None):
     def health(db: Database):
         db.execute(text("SELECT 1"))
         return {"status": "ok", "database": "ok"}
+
+    @router.get("/health/live", tags=["Health"])
+    def live():
+        return {"status": "alive"}
+
+    @router.get("/health/ready", tags=["Health"])
+    def ready():
+        try:
+            check_database(engine)
+        except (SQLAlchemyError, RuntimeError):
+            return JSONResponse({"status": "not_ready"}, status_code=503)
+        return {"status": "ready"}
+
+    @router.get("/health/setup", tags=["Health"])
+    def setup_health():
+        from support_agent.preflight import inspect
+
+        result = inspect(settings, engine)
+        configured = result["ready"] and result["setup_complete"]
+        return JSONResponse(
+            {"status": "configured" if configured else "setup_required"},
+            status_code=200 if configured else 503,
+        )
 
     for module in [
         identity,

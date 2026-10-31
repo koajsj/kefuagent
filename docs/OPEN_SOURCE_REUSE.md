@@ -78,3 +78,7 @@ P3 未移植新的第三方源码、未增加依赖。沿用前两阶段已审�
 ## P5 产品化
 
 继续直接依赖既有 FastAPI/Starlette（StaticFiles、FileResponse、Cookie）、Pydantic、SQLAlchemy/Alembic/PostgreSQL、AES-GCM 和 JSON Schema；复用本项目 P1–P4 身份、RLS、检索、工具循环、审计与用量机制。前端使用浏览器原生 ES Modules、DOM、Fetch、Web Crypto 和有限会话存储，无运行/构建框架依赖。公开交付和前端为本项目实现，没有复制上述仓库源码或引入第三方网页模板/素材。Prettier 仅作为临时格式化工具使用，不成为项目依赖，也不分发其源码。原有依赖许可证记录不变，主密钥轮换没有因产品化伪装为已实现功能。
+
+## P8 延续设计
+
+沿用上述已记录的 Chatwoot 会话归属/企业成员与协作收件箱理念，在现有 Conversation 上实现负责人、队列、独立内部协作记录和处理状态；不声称重新审查上游新版本，没有新增源码移植或运行依赖。摘要只选择逐字用户摘录、运营指标与可选 Compose 均由本项目独立实现，授权沿用本项目 MIT。

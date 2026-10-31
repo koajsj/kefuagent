@@ -1,9 +1,11 @@
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Request
 
 from support_agent.dependencies import Database, TenantAdmin, TenantContext
 from support_agent.models import AgentConfig
+from support_agent.operations_schemas import AnalyticsOut, OperatorOut
 from support_agent.rag_schemas import KnowledgeBindings
 from support_agent.services import workspace
 from support_agent.services.resources import get_owned
@@ -51,3 +53,21 @@ def set_bindings(
 @router.get("/workspace/statistics", response_model=StatisticsOut)
 def statistics(db: Database, context: TenantContext):
     return workspace.statistics(db, context)
+
+
+@router.get("/workspace/operators", response_model=list[OperatorOut])
+def operators(db: Database, context: TenantContext):
+    from support_agent.services.operations import operators as list_operators
+
+    return list_operators(db, context)
+
+
+@router.get("/workspace/analytics", response_model=AnalyticsOut)
+def analytics(
+    db: Database, context: TenantContext, start: datetime | None = None, end: datetime | None = None
+):
+    from support_agent.services.analytics import report
+
+    end = end or datetime.now(UTC)
+    start = start or end - timedelta(days=7)
+    return report(db, context, start, end)

@@ -117,6 +117,18 @@ class Conversation(Record, Timestamped, Base):
             "support_state IN ('ai','waiting','human','resolved')", name="support_state"
         ),
         Index("ix_conversations_tenant_created", "tenant_id", "created_at", "id"),
+        Index("ix_conversations_queue", "tenant_id", "support_state", "created_at", "id"),
+        Index("ix_conversations_assignee", "tenant_id", "assignee_id", "created_at"),
+        ForeignKeyConstraint(
+            ["tenant_id", "assignee_id"],
+            ["tenant_memberships.tenant_id", "tenant_memberships.user_id"],
+            name="fk_conversations_assignee_membership",
+        ),
+        CheckConstraint("priority IN ('low','normal','high','urgent')", name="priority"),
+        CheckConstraint("version > 0", name="version"),
+        CheckConstraint(
+            "jsonb_typeof(tags) = 'array' AND jsonb_array_length(tags) <= 10", name="tags"
+        ),
     )
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
@@ -124,6 +136,22 @@ class Conversation(Record, Timestamped, Base):
     status: Mapped[str] = mapped_column(String(16), default="open", server_default="open")
     subject: Mapped[str] = mapped_column(String(160), default="新会话", server_default="新会话")
     support_state: Mapped[str] = mapped_column(String(16), default="ai", server_default="ai")
+    assignee_id: Mapped[UUID | None]
+    priority: Mapped[str] = mapped_column(String(16), default="normal", server_default="normal")
+    tags: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    category: Mapped[str] = mapped_column(String(80), default="", server_default="")
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    first_response_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    waiting_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    human_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ever_human: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+
+    @property
+    def sla(self):
+        from support_agent.services.operations import service_times
+
+        return service_times(self)
 
 
 class AgentKnowledgeBase(Record, Base):
@@ -150,6 +178,9 @@ class Message(Record, Base):
     __table_args__ = (
         ForeignKeyConstraint(
             ["tenant_id", "conversation_id"], ["conversations.tenant_id", "conversations.id"]
+        ),
+        UniqueConstraint(
+            "tenant_id", "conversation_id", "id", name="uq_messages_conversation_identity"
         ),
         CheckConstraint("role IN ('user','assistant','tool')", name="role"),
         CheckConstraint("source IN ('manual','rag','agent')", name="source"),
@@ -479,3 +510,86 @@ class VisitorSession(Record, Base):
     turn_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Collaboration(Record, Base):
+    __tablename__ = "conversation_collaboration"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"],
+            ["conversations.tenant_id", "conversations.id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("kind IN ('note','assignment','handling','metadata')", name="kind"),
+        Index("ix_collaboration_history", "tenant_id", "conversation_id", "created_at", "id"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    conversation_id: Mapped[UUID]
+    actor_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    kind: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(String(4000), default="", server_default="")
+    details: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+
+
+class ConversationSummary(Record, Base):
+    __tablename__ = "conversation_summaries"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "conversation_id", "version"),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"],
+            ["conversations.tenant_id", "conversations.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "source_start_id"],
+            ["messages.tenant_id", "messages.conversation_id", "messages.id"],
+            name="fk_summary_source_start",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "source_end_id"],
+            ["messages.tenant_id", "messages.conversation_id", "messages.id"],
+            name="fk_summary_source_end",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "model_call_id"],
+            ["model_calls.tenant_id", "model_calls.id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("version > 0 AND source_count > 0", name="range"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    conversation_id: Mapped[UUID]
+    version: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(String(6000))
+    source_start_id: Mapped[UUID]
+    source_end_id: Mapped[UUID]
+    source_count: Mapped[int] = mapped_column(Integer)
+    model_call_id: Mapped[UUID]
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+
+
+class VisitorFeedback(Record, Timestamped, Base):
+    __tablename__ = "visitor_feedback"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "visitor_session_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"],
+            ["conversations.tenant_id", "conversations.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "visitor_session_id"],
+            ["visitor_sessions.tenant_id", "visitor_sessions.id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("rating IN ('satisfied','dissatisfied')", name="rating"),
+        Index("ix_visitor_feedback_tenant_created", "tenant_id", "created_at"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    conversation_id: Mapped[UUID]
+    visitor_session_id: Mapped[UUID]
+    rating: Mapped[str] = mapped_column(String(16))
+    comment: Mapped[str] = mapped_column(String(1000), default="", server_default="")

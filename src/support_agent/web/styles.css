@@ -717,3 +717,9 @@ select {
     transition: none !important;
   }
 }
+
+.operation-filters { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .75rem; align-items: end; }
+.operation-filters input, .operation-filters select { min-width: 0; }
+.operations { display: grid; gap: .75rem; margin-top: 1rem; }
+.collaboration-entry { border-bottom: 1px solid var(--border, #ddd); padding: .5rem 0; }
+.collaboration-entry p { white-space: pre-wrap; }

@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request
@@ -6,6 +7,12 @@ from sqlalchemy import select
 
 from support_agent.dependencies import Database, TenantContext
 from support_agent.models import Conversation, ModelCall
+from support_agent.operations_schemas import (
+    CollaborationOut,
+    NoteInput,
+    OperationsPatch,
+    SummaryOut,
+)
 from support_agent.rag_schemas import CallOut, ChatInput, ChatOut
 from support_agent.schemas import (
     ConversationCreate,
@@ -15,8 +22,8 @@ from support_agent.schemas import (
     MessageCreate,
     MessageOut,
 )
-from support_agent.services import chat, conversations
-from support_agent.services.resources import get_owned, list_owned
+from support_agent.services import chat, conversations, operations
+from support_agent.services.resources import get_owned
 from support_agent.tool_protocol import AgentTurnInput, AgentTurnOut
 
 router = APIRouter(prefix="/conversations", tags=["Conversations and messages"])
@@ -45,9 +52,24 @@ def list_conversations(
     db: Database,
     context: TenantContext,
     limit: int = Query(50, ge=1, le=100),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=10000),
+    q: str = Query("", max_length=100),
+    queue: Literal["all", "pending", "unassigned", "mine", "human", "ai", "resolved"] = "all",
+    assignee_id: UUID | None = None,
+    priority: Literal["low", "normal", "high", "urgent"] | None = None,
+    sort: Literal["newest", "oldest"] = "newest",
 ):
-    return list_owned(db, Conversation, context, limit, offset)
+    return operations.listing(
+        db,
+        context,
+        limit=limit,
+        offset=offset,
+        q=q,
+        queue=queue,
+        assignee_id=assignee_id,
+        priority=priority,
+        sort=sort,
+    )
 
 
 @router.get("/{conversation_id}", response_model=ConversationOut)
@@ -164,3 +186,40 @@ def stream_turn(
 
     get_owned(db, Conversation, context, conversation_id)
     return response(request, context, conversation_id, data)
+
+
+@router.patch("/{conversation_id}/operations", response_model=ConversationOut)
+def update_operations(
+    conversation_id: UUID,
+    data: OperationsPatch,
+    request: Request,
+    db: Database,
+    context: TenantContext,
+):
+    return operations.update(db, context, conversation_id, data, request)
+
+
+@router.get("/{conversation_id}/collaboration", response_model=list[CollaborationOut])
+def collaboration(
+    conversation_id: UUID,
+    db: Database,
+    context: TenantContext,
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0, le=10000),
+):
+    return operations.notes(db, context, conversation_id, limit, offset)
+
+
+@router.post("/{conversation_id}/collaboration", response_model=CollaborationOut, status_code=201)
+def note(
+    conversation_id: UUID, data: NoteInput, request: Request, db: Database, context: TenantContext
+):
+    return operations.add_note(db, context, conversation_id, data, request)
+
+
+@router.get("/{conversation_id}/summary", response_model=SummaryOut | None)
+def summary(conversation_id: UUID, db: Database, context: TenantContext):
+    from support_agent.services.memory import latest
+
+    get_owned(db, Conversation, context, conversation_id)
+    return latest(db, context, conversation_id)

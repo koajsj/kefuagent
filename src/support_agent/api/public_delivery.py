@@ -3,9 +3,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 
 from support_agent.dependencies import Database, TenantAdmin
-from support_agent.models import Publication
+from support_agent.models import Publication, VisitorFeedback
+from support_agent.operations_schemas import FeedbackInput, FeedbackOut
 from support_agent.public_schemas import (
     PublicationCreate,
     PublicationOut,
@@ -17,6 +19,7 @@ from support_agent.public_schemas import (
     VisitorTurn,
 )
 from support_agent.services import public_delivery as delivery
+from support_agent.services.audit import record
 from support_agent.services.resources import list_owned
 from support_agent.tool_protocol import AgentTurnOut
 
@@ -97,7 +100,6 @@ def end(request: Request, db: Database, context: Visitor):
 
 @router.get("/public/{pid}/sessions/{sid}/status", response_model=PublicRun | None)
 def status(request: Request, db: Database, context: Visitor):
-    from sqlalchemy import select
 
     from support_agent.models import ModelCall
     from support_agent.services.chat import reconcile_expired
@@ -130,3 +132,45 @@ def stream_turn(data: VisitorTurn, request: Request, db: Database, context: Visi
     from support_agent.streaming import response
 
     return response(request, context, context.conversation_id, data, public=True)
+
+
+@router.get("/public/{pid}/sessions/{sid}/feedback", response_model=FeedbackOut | None)
+def feedback(db: Database, request: Request, context: Visitor):
+    context = delivery.delivery_guard(db, context, request)
+    return db.scalar(
+        select(VisitorFeedback).where(
+            VisitorFeedback.tenant_id == context.tenant_id,
+            VisitorFeedback.visitor_session_id == context.public_session_id,
+        )
+    )
+
+
+@router.post("/public/{pid}/sessions/{sid}/feedback", response_model=FeedbackOut)
+def rate(data: FeedbackInput, db: Database, request: Request, context: Visitor):
+    context = delivery.delivery_guard(db, context, request)
+    row = db.scalar(
+        select(VisitorFeedback).where(
+            VisitorFeedback.tenant_id == context.tenant_id,
+            VisitorFeedback.visitor_session_id == context.public_session_id,
+        )
+    )
+    if row is None:
+        row = VisitorFeedback(
+            tenant_id=context.tenant_id,
+            conversation_id=context.conversation_id,
+            visitor_session_id=context.public_session_id,
+        )
+        db.add(row)
+    row.rating = data.rating
+    row.comment = data.comment or ""
+    db.flush()
+    record(
+        db,
+        request,
+        "visitor.feedback",
+        "visitor_session",
+        context.public_session_id,
+        tenant_id=context.tenant_id,
+        details={"rating": row.rating},
+    )
+    return row

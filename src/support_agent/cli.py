@@ -20,6 +20,7 @@ def main():
     parser = argparse.ArgumentParser(description="通用客服平台本地管理")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("create-admin")
+    commands.add_parser("preflight", help="只读检查部署配置和数据库")
     rotation = commands.add_parser("rotate-keys", help="租户范围主密钥预览、检查、原子执行或恢复")
     rotation.add_argument("mode", choices=["preview", "check", "execute", "recover"])
     rotation.add_argument("--tenant", type=UUID, required=True)
@@ -36,6 +37,8 @@ def main():
     for field in ("conversations", "visitors", "calls", "audit"):
         retention.add_argument("--" + field + "-days", type=int)
     args = parser.parse_args()
+    if args.command == "preflight":
+        return preflight(parser)
     if args.command != "create-admin":
         return maintenance(args, parser)
     try:
@@ -76,6 +79,25 @@ def main():
         print("平台管理员已创建。密码不会显示或写入文件。")
     except (SQLAlchemyError, RuntimeError):
         parser.exit(1, "初始化失败：请检查独立数据库连接、迁移和用户唯一性。\n")
+    finally:
+        engine.dispose()
+
+
+def preflight(parser):
+    import json
+
+    from support_agent.preflight import inspect
+
+    try:
+        settings = Settings()
+        engine, _ = build_database(settings)
+    except (ValidationError, ValueError):
+        parser.exit(1, "配置无效；请检查环境变量格式，详情不会显示以保护密钥。\n")
+    try:
+        result = inspect(settings, engine)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result["ready"]:
+            parser.exit(1)
     finally:
         engine.dispose()
 

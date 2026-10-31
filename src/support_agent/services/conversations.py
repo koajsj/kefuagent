@@ -4,6 +4,7 @@ from sqlalchemy import select
 
 from support_agent.errors import AppError, forbidden
 from support_agent.models import Conversation, Message
+from support_agent.services import operations
 from support_agent.services.audit import record
 from support_agent.services.chat import expire_active_calls
 from support_agent.services.resources import get_owned
@@ -28,11 +29,21 @@ def create(db, context, data, request):
 
 def set_status(db, context, resource_id, data, request):
     conversation = get_owned(db, Conversation, context, resource_id, lock=True)
-    if conversation.support_state != "ai" and context.role != "admin":
+    if context.role != "admin":
         raise forbidden()
     expire_active_calls(db, context, resource_id, request)
     conversation.status = data.status
     conversation.support_state = "resolved" if data.status == "closed" else "ai"
+    conversation.resolved_at = datetime.now(UTC) if data.status == "closed" else None
+    conversation.version += 1
+    operations.log(
+        db,
+        context,
+        conversation,
+        request,
+        "handling",
+        {"state": conversation.support_state, "explicit_reopen": data.status == "open"},
+    )
     db.flush()
     record(
         db,
@@ -47,15 +58,22 @@ def set_status(db, context, resource_id, data, request):
 
 def append_message(db, context, conversation_id, data, request):
     conversation = get_owned(db, Conversation, context, conversation_id, lock=True)
-    if conversation.channel == "public" and (
-        context.role != "admin" or conversation.support_state != "human" or data.role != "assistant"
-    ):
-        raise forbidden()
-    expire_active_calls(db, context, conversation_id, request)
     if conversation.status != "open":
         raise AppError(
             409, "conversation_closed", "Closed conversations cannot receive new messages"
         )
+    if data.role == "assistant" and (
+        context.role != "admin" or conversation.support_state == "human"
+    ):
+        operations.controlled(db, context, conversation)
+        if conversation.support_state != "human":
+            raise forbidden()
+    if conversation.channel == "public":
+        if conversation.support_state != "human" or data.role != "assistant":
+            raise forbidden()
+        operations.controlled(db, context, conversation)
+        operations.public_reply_guard(db, context, conversation, request)
+    expire_active_calls(db, context, conversation_id, request)
     message = Message(
         tenant_id=context.tenant_id,
         conversation_id=conversation_id,
@@ -65,6 +83,8 @@ def append_message(db, context, conversation_id, data, request):
         message_metadata=data.metadata,
     )
     db.add(message)
+    if data.role == "assistant" and conversation.first_response_at is None:
+        conversation.first_response_at = datetime.now(UTC)
     conversation.updated_at = datetime.now(UTC)
     db.flush()
     record(db, request, "message.create", "message", message.id, tenant_id=context.tenant_id)
@@ -139,23 +159,53 @@ def history(db, context, conversation_id, limit, offset, request, newest=False):
 
 
 def set_handling(db, context, conversation_id, data, request):
-    conversation = get_owned(db, Conversation, context, conversation_id, lock=True)
-    if data.state != "waiting" and context.role != "admin":
-        raise forbidden()
+    row = get_owned(db, Conversation, context, conversation_id, lock=True)
+    operations.check_version(row, data.expected_version)
+    if row.status == "closed":
+        raise AppError(409, "conversation_closed", "Use the explicit reopen action first")
+    state = data.state
+    if state == "human":
+        if row.assignee_id not in {None, context.user_id}:
+            raise AppError(409, "already_assigned", "Transfer the assigned conversation explicitly")
+        if context.role != "admin" and row.support_state not in {"waiting", "human"}:
+            raise forbidden()
+    elif state == "waiting":
+        if row.support_state == "human":
+            operations.controlled(db, context, row)
+    elif context.role != "admin":
+        operations.controlled(db, context, row)
+        if row.support_state != "human":
+            raise forbidden()
     expire_active_calls(db, context, conversation_id, request)
-    if conversation.status == "closed" and data.state != "ai":
-        raise AppError(409, "conversation_closed", "Reopen the conversation first")
-    conversation.support_state = data.state
-    conversation.status = "closed" if data.state == "resolved" else "open"
-    conversation.updated_at = datetime.now(UTC)
-    record(
+    if row.support_state == state:
+        return row
+    previous = row.support_state
+    now = datetime.now(UTC)
+    if state == "waiting":
+        row.waiting_since = now
+        row.human_started_at = None
+    if state == "human":
+        operations.operator(db, context, context.user_id)
+        row.assignee_id = context.user_id
+        row.human_started_at = now
+        row.ever_human = True
+    row.support_state = state
+    row.status = "closed" if state == "resolved" else "open"
+    row.resolved_at = now if state == "resolved" else None
+    row.updated_at = now
+    row.version += 1
+    operations.log(
         db,
+        context,
+        row,
         request,
-        "conversation.handling",
-        "conversation",
-        conversation.id,
-        tenant_id=context.tenant_id,
-        details={"state": data.state},
+        "handling",
+        {
+            "previous": previous,
+            "state": state,
+            "version": row.version,
+            "assignee": str(row.assignee_id) if row.assignee_id else None,
+        },
     )
     db.flush()
-    return conversation
+    return row

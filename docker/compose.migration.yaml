@@ -1,0 +1,10 @@
+# Opt in only for a one-off migration; this service is never the HTTP app.
+services:
+  migration:
+    build: .
+    profiles: [migration]
+    env_file:
+      - ${MIGRATION_ENV_FILE:?Set MIGRATION_ENV_FILE to an absolute protected env file}
+    entrypoint: ["alembic"]
+    command: ["upgrade", "head"]
+    restart: "no"

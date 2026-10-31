@@ -455,6 +455,8 @@ def turn(db, context, conversation_id, data, request):
     call.phase = "failed" if call.status == "failed" else "completed"
     limits.settle(call)
     call.result = result.model_dump(mode="json")
+    if call.status != "failed" and conversation.first_response_at is None:
+        conversation.first_response_at = datetime.now(UTC)
     conversation.updated_at = datetime.now(UTC)
     record(
         db,

@@ -89,8 +89,11 @@ def complete(
     task="qa",
     timeout=None,
     max_output_tokens=None,
+    purpose="answer",
 ):
-    deadline = time.monotonic() + (timeout or 120)
+    if timeout is not None and timeout < 1:
+        raise ProviderFailure("timeout", attempts=0)
+    deadline = time.monotonic() + (120 if timeout is None else timeout)
     first_failure = None
     for index in range(2):
         try:
@@ -130,6 +133,7 @@ def complete(
                 "model": target.model,
                 "provider": config.provider,
                 "selection_reason": reason,
+                "purpose": purpose,
                 "status": "running",
                 "input_tokens": None,
                 "output_tokens": None,

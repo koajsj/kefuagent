@@ -18,8 +18,8 @@ def main():
         for path in Path("tests").glob("test_*.py")
         for node in ast.walk(ast.parse(path.read_text()))
     )
-    if tests > 54:
-        raise SystemExit("Python test count exceeds P7 budget")
+    if tests > 56:
+        raise SystemExit("Python test count exceeds P8 budget")
     subprocess.run(["node", "--test", "tests/web.test.mjs"], check=True, timeout=10)
     assets = Path("src/support_agent/web")
     for path in assets.glob("*.js"):

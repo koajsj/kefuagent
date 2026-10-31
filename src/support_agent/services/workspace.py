@@ -2,7 +2,7 @@
 
 from sqlalchemy import delete, select
 
-from support_agent.credentials import cipher
+from support_agent.credentials import Keyring, cipher
 from support_agent.errors import AppError
 from support_agent.models import AgentConfig, AgentKnowledgeBase, KnowledgeBase, ModelCredential
 from support_agent.services.audit import record
@@ -65,11 +65,10 @@ def set_knowledge(db, context, config_id, data, request):
 def readiness(db, context, request):
     settings = request.app.state.settings
     try:
-        cipher(
-            settings.credential_master_key.get_secret_value()
-            if settings.credential_master_key
-            else None
-        )
+        ring = Keyring(settings)
+        if ring.active not in ring.keys:
+            raise AppError(503, "credential_key_unavailable", "No active key")
+        cipher(ring.keys[ring.active])
         key_ready = True
     except AppError:
         key_ready = False

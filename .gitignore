@@ -20,3 +20,6 @@ build/
 *.dump
 .pgpass
 .DS_Store
+
+# Optional Compose secrets are operator-owned and never published.
+secrets/

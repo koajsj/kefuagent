@@ -1,3 +1,4 @@
+import { operationFilters, operationsPanel } from "./operations.js";
 import { sessionState } from "./storage.js";
 import { requestIdentity, explain } from "./api.js";
 import {
@@ -34,7 +35,8 @@ export async function chatPage(ctx) {
     stopPoll = () => {},
     busy = false,
     openEpoch = 0;
-  const agents = await ctx.api("/agent-configs?limit=100");
+  const [agents, operators] = await Promise.all([ctx.api("/agent-configs?limit=100"), ctx.api("/workspace/operators")]);
+  let filters = {}, listEpoch = 0;
   const list = el("div", { class: "panel flush conversation-list" }),
     main = el("section", { class: "chat-main" });
   const listPager = el("div");
@@ -44,7 +46,7 @@ export async function chatPage(ctx) {
       ctx.isCurrent() &&
       !["StaleResponse", "AbortError"].includes(error.name)
     )
-      ctx.notify(error.message);
+      ctx.notify(error.code === "version_conflict" ? "会话已被其他人更新，请重新打开会话后再操作。" : error.message);
   };
   async function createConversation() {
     const subject = prompt("会话标题", "新会话");
@@ -62,7 +64,10 @@ export async function chatPage(ctx) {
     }
   }
   async function loadList() {
-    const rows = await ctx.api(`/conversations?limit=20&offset=${offset}`);
+    const ticket = ++listEpoch;
+    const params = new URLSearchParams({limit: "20", offset: String(offset), ...Object.fromEntries(Object.entries(filters).filter(([, value]) => value))});
+    const rows = await ctx.api(`/conversations?${params}`);
+    if (!ctx.isCurrent() || ticket !== listEpoch) return;
     list.replaceChildren(
       ...rows.map((row) =>
         el(
@@ -73,7 +78,7 @@ export async function chatPage(ctx) {
             {},
             button(row.subject, () => open(row).catch(showError), "link"),
             el("p", {}, status(row.support_state)),
-            el("small", {}, date(row.updated_at)),
+            el("small", {}, date(row.updated_at) + " · " + (row.priority || "normal") + " · " + (row.sla?.state || "未知")),
           ),
         ),
       ),
@@ -235,17 +240,16 @@ export async function chatPage(ctx) {
     });
     const human = selected.support_state === "human";
     const publicView = selected.channel === "public";
+    const canSend = () => selected?.id === cid && selected.status === "open" && (human
+      ? selected.support_state === "human" && (ctx.role === "admin" || selected.assignee_id === ctx.user.id)
+      : selected.support_state === "ai" && agents.length > 0 && !publicView);
     agent.disabled = publicView;
     const send = el(
       "button",
       {
         type: "submit",
         class: "primary",
-        disabled:
-          selected.status !== "open" ||
-          selected.support_state === "waiting" ||
-          (!agents.length && !human) ||
-          (publicView && (!human || ctx.role !== "admin")),
+        disabled: !canSend(),
       },
       human ? "发送人工答复" : "发送消息",
     );
@@ -257,7 +261,7 @@ export async function chatPage(ctx) {
     if (publicView)
       inline.append(
         message(
-          "公开会话的 AI 回复由访客入口发起。后台仅供查看，企业管理员可人工接管并答复；不会使用其他 Agent 的私有配置。",
+          "公开会话的 AI 回复由访客入口发起。管理员或当前负责人可在人工处理时答复；不会使用其他 Agent 的私有配置。",
         ),
       );
     composer.addEventListener("submit", async (event) => {
@@ -355,8 +359,19 @@ export async function chatPage(ctx) {
       } finally {
         stopPoll();
         busy = false;
-        send.disabled = false;
-        agent.disabled = publicView;
+        if (ctx.isCurrent() && selected?.id === cid && ticket === openEpoch) {
+          try {
+            const current = await ctx.api(`/conversations/${cid}`);
+            if (ctx.isCurrent() && selected?.id === cid && ticket === openEpoch) {
+              selected = current;
+              send.disabled = !canSend();
+              agent.disabled = publicView || current.status !== "open";
+              if (!canSend()) inline.append(message("会话状态或权限已变化，请重新打开会话查看。"));
+            }
+          } catch (error) {
+            showError(error);
+          }
+        }
       }
     });
     async function handling(state) {
@@ -364,7 +379,7 @@ export async function chatPage(ctx) {
       try {
         await ctx.api(`/conversations/${cid}/handling`, {
           method: "POST",
-          body: { state },
+          body: { state, expected_version: selected.version },
         });
         await loadList();
         await open({ id: cid });
@@ -373,16 +388,31 @@ export async function chatPage(ctx) {
       }
     }
     const controls = actions();
-    if (selected.status === "open")
+    if (selected.status === "open" && (selected.support_state !== "human" || ctx.role === "admin" || selected.assignee_id === ctx.user.id))
       controls.append(button("标记待人工", () => handling("waiting")));
     if (ctx.role === "admin") {
       if (selected.support_state !== "human" && selected.status === "open")
         controls.append(button("人工接管", () => handling("human")));
-      if (selected.support_state !== "ai")
+      if (selected.support_state !== "ai" && selected.status === "open")
         controls.append(button("恢复 AI", () => handling("ai")));
+      if (selected.status === "closed") controls.append(button("重新打开会话", async () => {
+        try {
+          await ctx.api(`/conversations/${cid}`, {method:"PATCH",body:{status:"open"}});
+          await open({id:cid});
+        } catch (error) { showError(error); }
+      }));
       if (selected.status === "open")
         controls.append(button("标记已解决", () => handling("resolved")));
+    } else if (selected.status === "open") {
+      if (selected.support_state === "waiting" && (!selected.assignee_id || selected.assignee_id === ctx.user.id))
+        controls.append(button("人工接管", () => handling("human")));
+      if (selected.support_state === "human" && selected.assignee_id === ctx.user.id) {
+        controls.append(button("恢复 AI", () => handling("ai")));
+        controls.append(button("标记已解决", () => handling("resolved")));
+      }
     }
+    const operations = await operationsPanel(ctx, selected, operators, () => ctx.isCurrent() && selected?.id === cid && ticket === openEpoch, () => open({id:cid}));
+    if (!ctx.isCurrent() || selected?.id !== cid || ticket !== openEpoch) return;
     main.replaceChildren(
       el(
         "div",
@@ -397,11 +427,12 @@ export async function chatPage(ctx) {
       composer,
       inline,
       el("div", { class: "chat-controls" }, el("h3", {}, "最近运行"), runs),
+      operations,
     );
     if (selected.support_state === "waiting")
       inline.append(
         message(
-          "已标记待人工。管理员可在此接管并回复；当前不会自动发送给外部客服。",
+          "已标记待人工。管理员或符合权限的成员可接管；当前不会自动发送给外部客服。",
         ),
       );
     if (!agents.length)
@@ -418,7 +449,7 @@ export async function chatPage(ctx) {
       "基于企业知识和已授权工具回答，保留每一步处理记录。",
       button("新建会话", createConversation, "primary"),
     ),
-    el("div", { class: "chat-layout" }, el("div", {}, list, listPager), main),
+    el("div", { class: "chat-layout" }, el("div", {}, operationFilters(operators, values => { filters = values; offset = 0; loadList().catch(showError); }), list, listPager), main),
   );
   main.append(
     empty("选择会话查看历史，或新建会话。企业成员共享当前企业的工作区。"),

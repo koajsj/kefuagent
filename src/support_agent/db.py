@@ -24,10 +24,12 @@ def set_tenant(db: Session, tenant_id) -> None:
 def check_database(engine) -> None:
     with engine.connect() as connection:
         role = connection.execute(
-            text("SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user")
+            text(
+                "SELECT rolsuper,rolbypassrls,rolcreaterole FROM pg_roles WHERE rolname=current_user"
+            )
         ).one()
         if any(role):
-            raise RuntimeError("HTTP database role must be NOSUPERUSER NOBYPASSRLS")
+            raise RuntimeError("HTTP database role must be NOSUPERUSER NOBYPASSRLS NOCREATEROLE")
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        if revision != "0008_public_delivery":
+        if revision != "0009_operations":
             raise RuntimeError("Database revision is not supported; run alembic upgrade head")

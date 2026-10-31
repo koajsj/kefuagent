@@ -48,3 +48,6 @@
     max-height: 50dvh;
   }
 }
+
+.public-rating { margin-top: 1rem; padding: 1rem; border: 1px solid var(--border, #ddd); border-radius: .75rem; }
+.public-rating form { display: grid; gap: .5rem; }

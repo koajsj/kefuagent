@@ -6,11 +6,14 @@ from sqlalchemy import delete, func, or_, select
 
 from support_agent.models import (
     AuditEvent,
+    Collaboration,
     Conversation,
+    ConversationSummary,
     Document,
     Message,
     ModelCall,
     ToolExecution,
+    VisitorFeedback,
     VisitorSession,
 )
 
@@ -139,6 +142,9 @@ def retention_plan(db, tenant_id, policy, *, lock=False):
     )
     for name, model in (
         ("messages", Message),
+        ("collaboration", Collaboration),
+        ("summaries", ConversationSummary),
+        ("feedback", VisitorFeedback),
         ("tool_executions", ToolExecution),
         ("visitor_sessions", VisitorSession),
         ("conversation_calls", ModelCall),

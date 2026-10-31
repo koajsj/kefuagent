@@ -212,6 +212,10 @@ def finish(
         "citations": [c.model_dump(mode="json") for c in citations or []],
     }
     if answer:
+        conv = get_owned(db, Conversation, context, call.conversation_id, lock=True)
+        if conv.first_response_at is None:
+            conv.first_response_at = datetime.now(UTC)
+        conv.updated_at = datetime.now(UTC)
         db.add(
             Message(
                 tenant_id=context.tenant_id,
@@ -340,6 +344,9 @@ def prompt(db, context, call, data, request):
                 evidence = request.app.state.retriever.search(
                     db, context, selected, previous_question
                 )
+    from support_agent.services.memory import payload as memory_payload
+
+    memory = memory_payload(db, context, call.conversation_id)
     payload = {"question": data.content, "company_preferences": config.behavior}
     instructions = SYSTEM
     if selected:
@@ -361,6 +368,12 @@ def prompt(db, context, call, data, request):
         evidence.pop()
         payload["evidence"].pop()
         messages[-1]["content"] = json.dumps(payload, ensure_ascii=False)
+    if memory:
+        payload["conversation_memory"] = memory
+        messages[-1]["content"] = json.dumps(payload, ensure_ascii=False)
+        if len(json.dumps(messages, ensure_ascii=False).encode()) + 128 * len(messages) > budget:
+            payload.pop("conversation_memory")
+            messages[-1]["content"] = json.dumps(payload, ensure_ascii=False)
     return messages, evidence, bool(selected)
 
 
@@ -419,7 +432,16 @@ def turn(db, context, conversation_id, data, request):
     deadline = started + TURN_SECONDS
     seen = set()
     try:
-        for _ in range(MAX_STEPS):
+        from support_agent.services import memory
+
+        context = context_after_io(db, context, call_id, request)
+        call = tool_execution.live_call(db, context, call_id)
+        summarized = memory.refresh(db, context, call, request, int(deadline - time.monotonic()))
+        context = context_after_io(db, context, call_id, request)
+        call = tool_execution.live_call(db, context, call_id)
+        if summarized:
+            messages, evidence, knowledge_enabled = prompt(db, context, call, data, request)
+        for _ in range(MAX_STEPS - (1 if summarized else 0)):
             context = context_after_io(db, context, call_id, request)
             get_owned(db, Conversation, context, conversation_id, lock=True)
             call = tool_execution.live_call(db, context, call_id)
@@ -458,6 +480,10 @@ def turn(db, context, conversation_id, data, request):
                 and "tool_calls" not in messages[2]
             ):
                 del messages[1:3]
+            if size() > budget and "conversation_memory" in json.loads(messages[-1]["content"]):
+                current_payload = json.loads(messages[-1]["content"])
+                current_payload.pop("conversation_memory")
+                messages[-1]["content"] = json.dumps(current_payload, ensure_ascii=False)
             if size() > budget:
                 raise AppError(422, "input_budget_exceeded", "Turn exceeds configured input budget")
             remaining = int(deadline - time.monotonic())

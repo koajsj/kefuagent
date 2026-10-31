@@ -27,59 +27,55 @@ const guard = async (ctx, fn) => {
   }
 };
 export async function dashboardPage(ctx) {
-  const s = await ctx.api("/workspace/statistics");
-  return el(
-    "div",
-    {},
-    heading("工作区概览", "统计来自当前企业数据库；离线演示也计入调用次数。"),
-    el(
-      "div",
-      { class: "kpi-row" },
-      ...[
-        ["Agent", s.agents],
-        ["会话", s.conversations],
-        ["文档", s.documents],
-        ["模型调用", s.model_calls],
-        ["失败调用", s.failed_calls],
-        ["工具执行", s.tool_executions],
-      ].map(([name, n]) =>
-        panel(name, el("strong", { class: "kpi" }, number(n))),
-      ),
-    ),
-    panel(
-      "Token 与费用",
-      el(
-        "p",
-        {},
-        `已知输入 ${number(s.known_input_tokens)} · 已知输出 ${number(s.known_output_tokens)} Token`,
-      ),
-      el(
-        "p",
-        {},
-        `另有 ${number(s.calls_with_unknown_usage)} 次调用用量未知，未按零计算。费用：未知。`,
-      ),
-    ),
-    panel(
-      "开始使用",
-      el(
-        "ol",
-        {},
-        ...[
-          "管理员创建模型凭证或使用离线演示。",
-          "创建知识库并上传资料。",
-          "创建 Agent，授权知识库与工具。",
-          "在客服会话中测试，再发布公开链接。",
-        ].map((t) => el("li", {}, t)),
-      ),
-      actions(
-        button("配置 Agent", () => ctx.navigate("agents")),
-        button("客服会话", () => ctx.navigate("chat")),
-        ctx.role === "admin"
-          ? button("公开发布", () => ctx.navigate("publications"))
-          : null,
-      ),
-    ),
-  );
+  const output = el("div");
+  const start = input("start", "", {type:"date", required:true});
+  const end = input("end", "", {type:"date", required:true});
+  const notice = el("div");
+  let epoch = 0;
+  const utcDay = d => d.toISOString().slice(0, 10);
+  function preset(days) {
+    const today = new Date();
+    const boundary = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 1));
+    end.value = utcDay(boundary);
+    start.value = utcDay(new Date(boundary.getTime() - days * 86400000));
+    guard(ctx, load);
+  }
+  async function load() {
+    const ticket = ++epoch;
+    output.replaceChildren();
+    const from = new Date(start.value + "T00:00:00Z"), to = new Date(end.value + "T00:00:00Z");
+    if (!start.value || !end.value || !Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || to <= from || to - from > 90 * 86400000) {
+      notice.replaceChildren(message("请选择不超过 90 天的有效 UTC 区间，结束日期不包含在内。", "error"));
+      return;
+    }
+    notice.replaceChildren(el("p", {class:"loading", role:"status"}, "正在加载运营数据…"));
+    let s;
+    try {
+      s = await ctx.api(`/workspace/analytics?${new URLSearchParams({start:from.toISOString(),end:to.toISOString()})}`);
+    } catch (error) {
+      if (ctx.isCurrent() && ticket === epoch && !["StaleResponse", "AbortError"].includes(error.name))
+        notice.replaceChildren(message(error.message, "error"));
+      return;
+    }
+    if (!ctx.isCurrent() || ticket !== epoch) return;
+    notice.replaceChildren();
+    const pct = n => n == null ? "未知" : `${(n * 100).toFixed(1)}%`;
+    const seconds = n => n == null ? "未知" : `${Math.round(n)} 秒`;
+    const c = s.conversations, ai = s.ai, u = s.usage, f = s.feedback;
+    output.replaceChildren(
+      el("div", {class:"kpi-row"}, ...[["会话",c.total],["待处理",c.pending],["已解决",c.resolved],["超时",c.overdue],["调用",u.calls],["失败调用",u.failed]].map(([name,n]) => panel(name, el("strong",{class:"kpi"},number(n))))),
+      panel("服务与 AI", el("p",{}, `平均首次响应 ${seconds(c.avg_first_response_seconds)} · 平均解决 ${seconds(c.avg_resolution_seconds)} · 转人工率 ${pct(c.handoff_rate)}`), el("p",{}, `AI 解决 ${number(c.ai_resolved)} · 转人工 ${number(c.ai_to_human)} · 未解决 ${number(c.ai_unresolved)}`), el("p",{}, `检索使用率 ${pct(ai.retrieval_use_rate)} · 引用验证率 ${pct(ai.valid_citation_rate)} · 工具成功率 ${pct(ai.tool_success_rate)}`), el("p",{class:"note"},"引用验证仅表示引用有效，不代表回答正确。")),
+      panel("用量与费用", el("p",{}, `已知输入 ${number(u.input_tokens)} · 已知输出 ${number(u.output_tokens)} Token · ${number(u.unknown_usage_calls)} 次用量未知`), el("p",{}, `已知费用 ${number(u.known_cost)} · ${number(u.unknown_cost_calls)} 次费用未知`), u.models.length ? table(["模型","调用","已知输入 Token","已知输出 Token","用量未知"],u.models.map(m => [m.model,number(m.calls),number(m.input_tokens),number(m.output_tokens),number(m.unknown_usage_calls)])) : empty("暂无模型用量。")),
+      panel("每日趋势（UTC）", s.trend.length ? table(["日期","会话","AI","人工","调用","已知输入 Token","已知输出 Token","用量未知"],s.trend.map(t => [t.day,number(t.conversations),number(t.ai),number(t.human),number(t.calls),number(t.input_tokens),number(t.output_tokens),number(t.unknown_usage_calls)])) : empty("该区间暂无趋势数据。")),
+      panel("分类与未解决会话", s.categories.length ? table(["分类","会话数"],s.categories.map(x => [x.category || "未分类",number(x.count)])) : empty("暂无分类。"), s.unresolved.length ? table(["未解决会话","编号"],s.unresolved.map(x => [x.subject,x.id])) : empty("暂无未解决会话。")),
+      panel("访客反馈", el("p",{}, `满意 ${number(f.satisfied)} · 不满意 ${number(f.dissatisfied)} · 未评价 ${number(f.unrated)} · 满意率 ${pct(f.satisfaction_rate)}`))
+    );
+  }
+  const range = el("form",{class:"operation-filters"}, label("开始日期（UTC，含）",start), label("结束日期（UTC，不含）",end), el("button",{type:"submit"},"查询"), button("最近 7 天",() => preset(7)), button("最近 30 天",() => preset(30)));
+  range.addEventListener("submit", e => { e.preventDefault(); guard(ctx, load); });
+  const root = el("div",{}, heading("运营概览","按 UTC 半开区间统计，最多查询 90 天。"), range, notice, output);
+  preset(7);
+  return root;
 }
 export async function setupPage(ctx) {
   const [s, health] = await Promise.all([

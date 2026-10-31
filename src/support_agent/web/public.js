@@ -21,6 +21,7 @@ let info,
   poll;
 const key = "support.visitor." + pid;
 const feedback = el("div"),
+  ratingArea = el("section", {class:"public-rating"}),
   thread = el("div", {
     class: "thread",
     role: "log",
@@ -126,6 +127,28 @@ async function loadHistory(next = 0) {
   older.disabled = rows.length < 50;
   if (next === 0) thread.scrollTop = thread.scrollHeight;
 }
+async function loadRating() {
+  if (!session) return;
+  const sid = session.id;
+  const existing = await api(`/sessions/${sid}/feedback`);
+  if (session?.id !== sid) return;
+  const rating = el("select", {name:"rating", required:true}, el("option",{value:"satisfied", selected:existing?.rating === "satisfied"},"满意"), el("option",{value:"dissatisfied", selected:existing?.rating === "dissatisfied"},"不满意"));
+  const comment = textArea("comment", existing?.comment || "", {maxLength:1000, rows:2, placeholder:"可选：告诉我们您的体验"});
+  const result = el("div");
+  const submit = el("button", {type:"submit"}, existing ? "更新评价" : "提交评价");
+  const form = el("form", {}, label("服务评价", rating), label("评价内容（选填）", comment), submit, result);
+  form.addEventListener("submit", async e => {
+    e.preventDefault();
+    if (submit.disabled || session?.id !== sid) return;
+    submit.disabled = true;
+    try {
+      await api(`/sessions/${sid}/feedback`, {method:"POST", body:{rating:rating.value, comment:comment.value.trim() || null}});
+      if (session?.id === sid) await loadRating();
+    } catch (error) { if (session?.id === sid) result.replaceChildren(message(error.message,"error")); }
+    finally { submit.disabled = false; }
+  });
+  ratingArea.replaceChildren(el("h2", {}, "服务评价"), existing ? el("p", {class:"note"}, "已评价 · " + date(existing.created_at)) : null, form);
+}
 async function runtime() {
   if (!session) return;
   const result = await api(`/sessions/${session.id}/status`);
@@ -143,6 +166,7 @@ async function start() {
     save();
     render();
     await loadHistory();
+    await loadRating();
   } finally {
     busy = false;
   }
@@ -201,6 +225,7 @@ function render() {
       );
       await loadHistory();
       await runtime();
+      await loadRating();
     } catch (error) {
       showError(error);
     } finally {
@@ -251,6 +276,7 @@ function render() {
           thread,
           runs,
           composer,
+          ratingArea,
         ]
       : [
           message(
@@ -283,6 +309,7 @@ try {
     try {
       await loadHistory();
       await runtime();
+      await loadRating();
     } catch (error) {
       if (
         ["visitor_authentication_required", "http_error"].includes(error.code)

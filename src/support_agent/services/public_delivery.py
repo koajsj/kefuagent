@@ -400,4 +400,6 @@ def end(db, context, request):
     visitor.ended_at = datetime.now(UTC)
     conv.status = "closed"
     conv.support_state = "resolved"
+    conv.resolved_at = datetime.now(UTC)
+    conv.version += 1
     record(db, request, "visitor.end", "visitor_session", visitor.id, tenant_id=context.tenant_id)

@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: support_db_admin
+      POSTGRES_DB: support_agent
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U support_db_admin -d support_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+  app:
+    build: .
+    env_file: .env.compose
+    environment:
+      DOCUMENT_STORAGE_ROOT: /data/documents
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - document_data:/data/documents
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=5).close()"]
+      interval: 30s
+      timeout: 7s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password
+volumes:
+  postgres_data:
+  document_data:

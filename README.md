@@ -2,7 +2,7 @@
 
 可独立部署的多租户客服产品：管理工作台、知识库、模型凭证、客服会话、只读工具、公开客服链接和网站嵌入。Python / FastAPI / PostgreSQL 模块化单体；没有行业连接器、任意代码插件、Redis、Celery 或向量服务。
 
-**当前 0.6.0（P7）**：增加可比较的离线质量评测、中英词面多路召回/RRF、SSE 运行阶段与安全分段交付、版本化主密钥维护 CLI、默认关闭的数据保留 CLI 和 GitHub CI。保留 OpenAI-compatible 自定义公网 HTTPS Base URL、第三方 Key/Model ID、模型路由及备用机制。真实模型效果、浏览器 GUI 和生产部署尚未验收；小型合成集与 Mock 结果不能代替客服质量。P7 实际状态见 [P7 验收](docs/P7_ACCEPTANCE.md)，历史 [P6 验收](docs/ACCEPTANCE.md) 保留。
+**当前 0.7.0（P8）**：增加企业客服队列、负责人分配、内部协作备注和轻量 SLA；会话级可追溯摘录记忆；真实数据运营 Dashboard 与访客反馈；只读配置预检及可选 Compose。保留 P7 的检索、安全 SSE、密钥维护和保留策略。真实模型/摘要语义、GUI 和容器部署仍未验收，P7 远端 CI 首次超时。见 [P8 实施与验收](docs/P8_ACCEPTANCE.md) 和 [可选部署](docs/P8_DEPLOYMENT.md)；[P7 记录](docs/P7_ACCEPTANCE.md)、[P6 记录](docs/ACCEPTANCE.md) 保留。
 
 ## 本机启动
 
@@ -24,7 +24,7 @@ uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8
 
 打开 [管理工作台](http://127.0.0.1:8000)、[健康检查](http://127.0.0.1:8000/api/v1/health)、[Swagger](http://127.0.0.1:8000/docs)、[ReDoc](http://127.0.0.1:8000/redoc)。浏览器地址须与 WEB_ORIGIN 完全一致，默认使用 `127.0.0.1`，不混用 localhost。
 
-当前迁移 head 为 **0008_public_delivery**。服务启动检查版本及非 SUPERUSER / 非 BYPASSRLS 运行角色，不会自动建库、迁移或初始化用户。0007/0008 已获得本项目 dev/test 升级授权；其他环境仍须先审查 SQL 再授权执行。禁止清库重装解决升级错误。
+当前迁移 head 为 **0009_operations**。服务启动检查版本及非 SUPERUSER / 非 BYPASSRLS 运行角色，不会自动建库、迁移或初始化用户。0007–0009 已获得本项目 dev/test 升级授权；其他环境仍须先审查 SQL 再授权执行。禁止清库重装解决升级错误。
 
 ## 首次使用流程
 
@@ -136,7 +136,7 @@ src/support_agent/
   ingestion.py、storage.py     # 四格式解析、私有文件
   tool_protocol.py、tool_runtime.py、tool_worker.py
   dependencies.py、main.py、db.py、config.py、cli.py
-migrations/                   # 0001–0008 增量迁移
+migrations/                   # 0001–0009 增量迁移
 scripts/、tests/、docs/
 ```
 
@@ -148,12 +148,32 @@ uv run python scripts/check.py
 node --test tests/web.test.mjs
 ```
 
-检查脚本执行 Ruff、格式、dev/test Alembic 差异和有界 PostgreSQL/Mock 回归。外部环境必须指定独立 TEST_DATABASE_URL（库名含 test），不模拟真实数据库、不清库；测试只追加随机数据并删除自身创建的文档。P6 基线 51 项 Python / 4 项 JS；P7 保留原回归，最多 54 / 5 项，Python 单次全量硬上限 60 秒。离线质量评测和 CI 说明见下方链接。
+检查脚本执行 Ruff、格式、dev/test Alembic 差异和有界 PostgreSQL/Mock 回归。外部环境必须指定独立 TEST_DATABASE_URL（库名含 test），不模拟真实数据库、不清库；测试只追加随机数据并删除自身创建的文档。P6 基线 51 项 Python / 4 项 JS；P7 为 54 / 5 项；P8 最多 56 / 6 项，Python 单次全量硬上限 60 秒。离线质量评测和 CI 说明见下方链接。
 
-已在本机隔离副本验证数据库、文档和密钥恢复；未进行真实模型、浏览器 GUI、生产 Linux/HTTPS 或负载验收；不承诺已完成生产质量验收。SSE 只在最终校验后交付答案，尚无上游逐 token 输出、匿名人机验证、审批写工具、完整人工工作台、全链路隐私擦除或无停机密钥分发。保留策略默认关闭，CLI 执行需要显式确认。内部成员共享企业会话，不是按席位/个人私有权限的客服系统。
+已在本机隔离副本验证数据库、文档和密钥恢复；未进行真实模型、浏览器 GUI、生产 Linux/HTTPS 或负载验收；不承诺已完成生产质量验收。SSE 只在最终校验后交付答案，尚无上游逐 token 输出、匿名人机验证、审批写工具、完整全渠道人工工作台、全链路隐私擦除或无停机密钥分发。保留策略默认关闭，CLI 执行需要显式确认。内部成员共享企业会话可见性；负责人限制人工控制，不是个人私有收件箱。
 
 常见问题：401 检查登录/访客令牌期限；403 检查成员角色、Origin 与企业；409 检查版本、忙会话与幂等键；413/422 检查文件与 Schema/地址白名单；503 检查数据库、主密钥、PUBLIC_RATE_KEY 和迁移。失败响应仅分类/关联 ID，不回显输入/堆栈。不要用清库或关闭安全校验解决。
 
 P7 专项：[离线质量评测与检索](docs/P7_QUALITY.md)、[SSE / 密钥轮换与恢复 / 数据保留 / CI](docs/P7_RUNTIME.md)。`uv run python scripts/evaluate_quality.py --compare OLD_REPORT.json` 可生成同版本比较；不提供默认开启的真实模型评测。
 
 详细资料：[架构](docs/ARCHITECTURE.md)、[开源来源](docs/OPEN_SOURCE_REUSE.md)、[运行安全与保留](docs/OPERATIONS.md)、[Linux/备份/升级](docs/DEPLOYMENT.md)。本项目当前不接入任何行业系统。项目代码采用 [MIT License](LICENSE)，版权署名 koajsj；第三方依赖保留各自许可证，见 [依赖授权](docs/DEPENDENCY_LICENSES.md)。
+
+
+## 日常客服运营（离线演示）
+
+1. 按上方交互命令首次创建管理员，再在平台管理创建企业、用户和 admin/member 关系；无默认密码。
+2. 创建 `demo` Agent，导入 TXT/Markdown/PDF/DOCX 到知识库并授权 Agent；无需真实 Key。新建会话咨询知识或使用静态只读工具，Mock 只验证流程。
+3. 在客服会话标记待人工，管理员分配有效成员；客服在“我的会话”接管、回复、记录内部备注、标签及分类，再恢复 AI 或解决。内部备注不展示给访客，不发送给模型。并发版本冲突需重新打开读取，不自动覆盖。
+4. 在公开入口发布演示，用两个独立访客会话验证隔离；后台接管后用访客刷新历史读取人工回复，在结束前提交满意/不满意评价。
+5. 运营概览选择 7/30 天或不超过 90 天 UTC 半开区间。未知用量及费用单列；引用验证率和 AI 解决数均不是回答正确率。轻量 SLA 的口径见验收文档。
+6. 长对话由 Agent turn 自动触发旧用户摘录摘要，查看版本及来源范围。近期完整轮次、旧摘要和当前证据分别处理；摘要不作为事实证据。真实语义保留能力尚未验收。
+
+```bash
+mkdir -p .local/documents && chmod 700 .local/documents  # 自建私有目录，不指向备份
+uv run python -m support_agent.cli preflight  # 只读，非零退出时按分类修复
+# Liveness: /api/v1/health/live
+# DB/角色/迁移 readiness: /api/v1/health/ready
+# 初始化及必要配置: /api/v1/health/setup（未就绪返回 503）
+```
+
+新增 API：会话 `/operations`、`/collaboration`、`/summary`；企业 `/workspace/operators`、`/workspace/analytics`；访客 `/feedback`。认证、Origin、租户和访客令牌规则沿用原接口。备份与恢复继续使用数据库 + 私有文档 + 独立密钥三部分方案，不通过删除卷解决故障。
