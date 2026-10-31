@@ -10,6 +10,15 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
     database_url: SecretStr
     migration_database_url: SecretStr | None = None
+    http_limits_enabled: bool = False
+    http_rate_key: SecretStr | None = Field(default=None, min_length=32, max_length=256)
+    http_requests_per_minute: int = Field(default=1200, ge=1)
+    http_login_per_minute: int = Field(default=30, ge=1)
+    http_upload_per_minute: int = Field(default=20, ge=1)
+    http_public_per_minute: int = Field(default=120, ge=1)
+    http_sse_per_minute: int = Field(default=20, ge=1)
+    http_sse_ip_connections: int = Field(default=4, ge=1, le=32)
+    http_sse_global_connections: int = Field(default=32, ge=1, le=128)
     session_hours: int = Field(default=12, ge=1, le=168)
     web_origin: str = "http://127.0.0.1:8000"
     allow_external_models: bool = False

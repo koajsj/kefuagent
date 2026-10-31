@@ -121,22 +121,38 @@ def response(request, context, conversation_id, data, *, public=False):
                 yield frame(event, final)
                 return
             answer = final["answer"]
+            # Buffer before checking: release at most 2048 characters per fresh snapshot.
+            # Backpressure can delay resumption; time is checked before any further payload.
+            buffered = ""
+            checked_at = time.monotonic()
             for offset in range(0, len(answer), 128):
+                buffered += answer[offset : offset + 128]
+                if len(buffered) < 2048 and time.monotonic() - checked_at < 0.25:
+                    continue
+                if await request.is_disconnected():
+                    return
                 current = await asyncio.to_thread(snapshot, result["call_id"])
                 if current != final:
                     yield frame(
                         "failed", {"error_category": "delivery_changed", "discard_deltas": True}
                     )
                     return
-                yield frame(
-                    "delta", {"text": answer[offset : offset + 128], "call_id": final["call_id"]}
-                )
+                checked_at = time.monotonic()
+                yield frame("delta", {"text": buffered, "call_id": final["call_id"]})
+                buffered = ""
             # One final revocation/source check; no database transaction survives a yield.
             if await asyncio.to_thread(snapshot, result["call_id"]) != final:
                 yield frame(
                     "failed", {"error_category": "delivery_changed", "discard_deltas": True}
                 )
                 return
+            if buffered:
+                yield frame("delta", {"text": buffered, "call_id": final["call_id"]})
+                if await asyncio.to_thread(snapshot, result["call_id"]) != final:
+                    yield frame(
+                        "failed", {"error_category": "delivery_changed", "discard_deltas": True}
+                    )
+                    return
             yield frame("completed", final)
         except AppError as exc:
             yield frame("failed", {"error_category": exc.code, "discard_deltas": True})

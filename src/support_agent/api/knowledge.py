@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, Response
+from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
@@ -53,9 +54,28 @@ def update(
     return knowledge.update(db, context, knowledge_base_id, data, request)
 
 
-@router.delete("/knowledge-bases/{knowledge_base_id}", status_code=204)
-def delete_base(knowledge_base_id: UUID, request: Request, db: Database, context: TenantAdmin):
-    knowledge.delete_base(db, context, knowledge_base_id, request)
+@router.delete(
+    "/knowledge-bases/{knowledge_base_id}",
+    status_code=204,
+    responses={
+        200: {"description": "Deletion preview"},
+        202: {"description": "Batch completed; retry to resume"},
+    },
+)
+def delete_base(
+    knowledge_base_id: UUID,
+    request: Request,
+    db: Database,
+    context: TenantAdmin,
+    batch_size: int = Query(25, ge=1, le=100),
+    preview: bool = False,
+):
+    progress = knowledge.delete_base(
+        db, context, knowledge_base_id, request, batch_size=batch_size, preview=preview
+    )
+    if progress is not None:
+        return JSONResponse(progress, status_code=200 if preview else 202)
+    return Response(status_code=204)
 
 
 @router.post(

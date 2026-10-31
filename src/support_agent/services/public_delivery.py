@@ -18,6 +18,7 @@ from support_agent.models import (
     Publication,
     PublicRoute,
     Tenant,
+    ToolExecution,
     User,
     VisitorSession,
 )
@@ -317,6 +318,43 @@ def delivery_guard(db, context, request):
 def history(db, context, request, limit, offset):
     context = delivery_guard(db, context, request)
     rows = conversations.history(db, context, context.conversation_id, limit, offset, request, True)
+    call_ids = {
+        row.model_call_id
+        for row in rows
+        if row.role == "assistant"
+        and row.model_call_id
+        and not (row.message_metadata if hasattr(row, "message_metadata") else row.metadata).get(
+            "redacted"
+        )
+        and (
+            row.source == "manual"
+            or (row.message_metadata if hasattr(row, "message_metadata") else row.metadata).get(
+                "final"
+            )
+        )
+    }
+    calls = {}
+    executions_by_call = {}
+    if call_ids:
+        calls = {
+            call.id: call
+            for call in db.scalars(
+                select(ModelCall).where(
+                    ModelCall.tenant_id == context.tenant_id,
+                    ModelCall.conversation_id == context.conversation_id,
+                    ModelCall.id.in_(call_ids),
+                )
+            )
+        }
+        for execution in db.scalars(
+            select(ToolExecution)
+            .where(
+                ToolExecution.tenant_id == context.tenant_id,
+                ToolExecution.model_call_id.in_(call_ids),
+            )
+            .order_by(ToolExecution.created_at, ToolExecution.id)
+        ):
+            executions_by_call.setdefault(execution.model_call_id, []).append(execution)
     result = []
     for row in rows:
         metadata = row.message_metadata if hasattr(row, "message_metadata") else row.metadata
@@ -329,8 +367,10 @@ def history(db, context, request, limit, offset):
             continue
         tools = []
         if row.role == "assistant" and row.model_call_id and not metadata.get("redacted"):
-            call = get_owned(db, ModelCall, context, row.model_call_id)
-            executions = agent_turns.executions(db, context, call.id)
+            call = calls.get(row.model_call_id)
+            if call is None:
+                raise missing()
+            executions = executions_by_call.get(call.id, [])
             tool_execution.ensure_delivery(db, context, call, executions, request)
             tools = [
                 {

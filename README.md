@@ -209,3 +209,9 @@ uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8
 <div align="center">
   <sub>✦ Built for practical, bounded and maintainable AI customer support.</sub>
 </div>
+
+## P10 性能与资源治理
+
+检索排序使用预计算 rank/coverage，运营统计下推 PostgreSQL，历史关联批量读取；SSE 按缓冲和时间重新验权后交付。知识库删除新增预览和有界批次，未完成时由界面“继续清理”，不自动无限重试。详情与离线证据见 [P10 验收与限制](docs/P10_ACCEPTANCE.md)。
+
+当前迁移 head 为 `0010_http_ingress`。仅本机新隔离 P10 库已获授权升级；已有 dev/test 未变，应用启动前需先经授权备份并升级目标库。总入口保护须显式设置 `HTTP_LIMITS_ENABLED=true` 和共享 `HTTP_RATE_KEY`（或复用 PUBLIC_RATE_KEY），阈值见 `.env.example`；关闭时 preflight 会提示。所有实例共享数据库、密钥与阈值，生产代理、容量和多实例部署仍需独立验收，不把本机检查当生产通过。

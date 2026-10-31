@@ -593,3 +593,14 @@ class VisitorFeedback(Record, Timestamped, Base):
     visitor_session_id: Mapped[UUID]
     rating: Mapped[str] = mapped_column(String(16))
     comment: Mapped[str] = mapped_column(String(1000), default="", server_default="")
+
+
+class HttpBucket(Base):
+    """Global admission metadata only: HMAC keys, counters and expiring random leases."""
+
+    __tablename__ = "http_buckets"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    state: Mapped[dict] = mapped_column(JSONB, server_default="{}")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )

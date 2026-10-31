@@ -38,6 +38,7 @@ class PostgresFTSRetriever:
         ]
         candidates = {}
         fused = {}
+        body_coverage = {}
         # Each lane covers all authorized KBs together; do not let a per-KB quota bias fusion.
         for vector, expression in lanes:
             if not expression:
@@ -71,23 +72,32 @@ class PostgresFTSRetriever:
                 .limit(60)
             ).all()
             for rank, (chunk, name, _) in enumerate(rows, 1):
-                if not reference_is_safe(chunk.content) or coverage(chunk.content, groups) < 0.4:
+                if not reference_is_safe(chunk.content):
+                    continue
+                if chunk.id not in body_coverage:
+                    body_coverage[chunk.id] = coverage(chunk.content, groups)
+                if body_coverage[chunk.id] < 0.4:
                     continue
                 candidates[chunk.id] = (chunk, name)
                 fused[chunk.id] = fused.get(chunk.id, 0) + 1 / (60 + rank)
         # A third lexical lane distinguishes intent coverage and headings among FTS candidates.
+        title_coverage = {
+            cid: coverage((chunk.section or "") + " " + name, groups)
+            for cid, (chunk, name) in candidates.items()
+        }
         lexical = sorted(
             candidates,
             key=lambda cid: (
-                -coverage(candidates[cid][0].content, groups),
-                -coverage((candidates[cid][0].section or "") + " " + candidates[cid][1], groups),
+                -body_coverage[cid],
+                -title_coverage[cid],
                 str(candidates[cid][0].document_id),
                 candidates[cid][0].position,
             ),
         )
-        for rank, cid in enumerate(lexical, 1):
+        lexical_rank = {cid: rank for rank, cid in enumerate(lexical, 1)}
+        for cid, rank in lexical_rank.items():
             fused[cid] += 1 / (60 + rank)
-        ordered = sorted(candidates, key=lambda cid: (-fused[cid], lexical.index(cid)))[:limit]
+        ordered = sorted(candidates, key=lambda cid: (-fused[cid], lexical_rank[cid]))[:limit]
         return [
             SearchHit(
                 document_id=candidates[cid][0].document_id,

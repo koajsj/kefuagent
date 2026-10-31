@@ -12,6 +12,9 @@ def build_database(settings: Settings):
         echo=False,
         connect_args={"connect_timeout": 5, "options": "-c statement_timeout=10000"},
     )
+    from support_agent.observability import instrument
+
+    instrument(engine)
     return engine, sessionmaker(engine, expire_on_commit=False)
 
 
@@ -31,5 +34,5 @@ def check_database(engine) -> None:
         if any(role):
             raise RuntimeError("HTTP database role must be NOSUPERUSER NOBYPASSRLS NOCREATEROLE")
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        if revision != "0009_operations":
+        if revision != "0010_http_ingress":
             raise RuntimeError("Database revision is not supported; run alembic upgrade head")

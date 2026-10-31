@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from support_agent.dependencies import resume_context
 from support_agent.errors import AppError
@@ -240,32 +240,40 @@ def delete_document(db, context, document_id, request):
     db.flush()
 
 
-def delete_base(db, context, kid, request):
+def delete_base(db, context, kid, request, *, batch_size=25, preview=False):
     base = db.scalar(
         select(KnowledgeBase)
         .where(KnowledgeBase.id == kid, KnowledgeBase.tenant_id == context.tenant_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if base is None:
-        return
-    base.status = "deleting"
-    # Mark all documents before I/O; no new upload, reprocess or retrieval can enter.
-    docs = db.scalars(
-        select(Document)
-        .where(Document.tenant_id == context.tenant_id, Document.knowledge_base_id == kid)
-        .order_by(Document.id)
-        .with_for_update()
-    ).all()
-    for doc in docs:
-        doc.status = "deleting"
-        doc.processing_token = None
-        doc.chunk_count = 0
-        db.execute(
-            delete(DocumentChunk).where(
-                DocumentChunk.tenant_id == context.tenant_id, DocumentChunk.document_id == doc.id
-            )
+        return None
+
+    def remaining():
+        return db.scalar(
+            select(func.count())
+            .select_from(Document)
+            .where(Document.tenant_id == context.tenant_id, Document.knowledge_base_id == kid)
         )
-    ids = [doc.id for doc in docs]
+
+    if preview:
+        docs = db.scalars(
+            select(Document)
+            .where(Document.tenant_id == context.tenant_id, Document.knowledge_base_id == kid)
+            .order_by(Document.id)
+            .limit(batch_size)
+        ).all()
+        return {
+            "remaining": remaining(),
+            "batch_size": batch_size,
+            "status": base.status,
+            "documents": [
+                {"id": str(doc.id), "filename": doc.filename, "status": doc.status} for doc in docs
+            ],
+        }
+    # The base tombstone hides every chunk immediately, without loading all documents.
+    base.status = "deleting"
     record(
         db,
         request,
@@ -275,11 +283,7 @@ def delete_base(db, context, kid, request):
         tenant_id=context.tenant_id,
     )
     db.commit()
-    for document_id in ids:
-        resume_context(db, context, request, admin=True)
-        delete_document(db, context, document_id, request)
-        db.commit()
-    resume_context(db, context, request, admin=True)
+    context = resume_context(db, context, request, admin=True)
     base = db.scalar(
         select(KnowledgeBase)
         .where(KnowledgeBase.id == kid, KnowledgeBase.tenant_id == context.tenant_id)
@@ -287,7 +291,80 @@ def delete_base(db, context, kid, request):
         .execution_options(populate_existing=True)
     )
     if base is None:
-        return
+        return None
+    docs = list(
+        db.scalars(
+            select(Document)
+            .where(Document.tenant_id == context.tenant_id, Document.knowledge_base_id == kid)
+            .order_by(Document.id)
+            .limit(batch_size)
+            .with_for_update()
+        )
+    )
+    ids = [doc.id for doc in docs]
+    for doc in docs:
+        doc.status = "deleting"
+        doc.processing_token = None
+        doc.lease_expires_at = None
+        doc.chunk_count = 0
+        record(
+            db,
+            request,
+            "document.delete_requested",
+            "document",
+            doc.id,
+            tenant_id=context.tenant_id,
+        )
+    if ids:
+        db.execute(
+            delete(DocumentChunk).where(
+                DocumentChunk.tenant_id == context.tenant_id, DocumentChunk.document_id.in_(ids)
+            )
+        )
+    db.commit()
+    context = resume_context(db, context, request, admin=True)
+    # Stable base -> document lock order serializes retries and prevents a late unlink.
+    base = db.scalar(
+        select(KnowledgeBase)
+        .where(KnowledgeBase.id == kid, KnowledgeBase.tenant_id == context.tenant_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if base is None:
+        return None
+    docs = list(
+        db.scalars(
+            select(Document)
+            .where(Document.tenant_id == context.tenant_id, Document.id.in_(ids))
+            .order_by(Document.id)
+            .with_for_update()
+        )
+    )
+    for doc in docs:
+        try:
+            request.app.state.storage.delete(context.tenant_id, doc.id)
+        except OSError:
+            raise AppError(
+                503,
+                "storage_cleanup_pending",
+                "Deletion is hidden; retry DELETE to resume the bounded batch",
+            ) from None
+        db.delete(doc)
+        record(db, request, "document.delete", "document", doc.id, tenant_id=context.tenant_id)
+    db.flush()
+    count = remaining()
+    if count:
+        record(
+            db,
+            request,
+            "knowledge_base.delete_progress",
+            "knowledge_base",
+            kid,
+            tenant_id=context.tenant_id,
+            details={"deleted": len(docs), "remaining": count},
+        )
+        return {"status": "deleting", "deleted": len(docs), "remaining": count}
     db.delete(base)
     record(db, request, "knowledge_base.delete", "knowledge_base", kid, tenant_id=context.tenant_id)
     db.flush()
+    return None

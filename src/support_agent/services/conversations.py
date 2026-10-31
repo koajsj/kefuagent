@@ -120,18 +120,40 @@ def history(db, context, conversation_id, limit, offset, request, newest=False):
     from support_agent.schemas import MessageOut
     from support_agent.services.tool_execution import ensure_delivery
 
+    # Batch associations for this page; permission/source checks below remain per call.
+    call_ids = {row.model_call_id for row in rows if row.source == "agent" and row.role != "user"}
+    calls = (
+        {
+            call.id: call
+            for call in db.scalars(
+                select(ModelCall).where(
+                    ModelCall.tenant_id == context.tenant_id, ModelCall.id.in_(call_ids)
+                )
+            )
+        }
+        if call_ids
+        else {}
+    )
+    executions_by_call = {}
+    if call_ids:
+        for execution in db.scalars(
+            select(ToolExecution).where(
+                ToolExecution.tenant_id == context.tenant_id,
+                ToolExecution.model_call_id.in_(call_ids),
+            )
+        ):
+            executions_by_call.setdefault(execution.model_call_id, []).append(execution)
     checked = {}
     result = []
     for row in rows:
         if row.source == "agent" and row.role != "user":
             if row.model_call_id not in checked:
-                call = get_owned(db, ModelCall, context, row.model_call_id)
-                executions = db.scalars(
-                    select(ToolExecution).where(
-                        ToolExecution.tenant_id == context.tenant_id,
-                        ToolExecution.model_call_id == call.id,
-                    )
-                ).all()
+                call = calls.get(row.model_call_id)
+                if call is None:
+                    from support_agent.errors import missing
+
+                    raise missing()
+                executions = executions_by_call.get(call.id, [])
                 try:
                     ensure_delivery(db, context, call, executions, request)
                     checked[call.id] = True

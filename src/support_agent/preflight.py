@@ -9,7 +9,7 @@ from support_agent.credentials import Keyring, cipher
 from support_agent.errors import AppError
 from support_agent.providers import validate_base_url
 
-EXPECTED_REVISION = "0009_operations"
+EXPECTED_REVISION = "0010_http_ingress"
 RLS_TABLES = (
     "agent_configs",
     "conversations",
@@ -39,6 +39,19 @@ def inspect(settings, engine):
 
     def add(name, status, message):
         checks.append({"name": name, "status": status, "message": message})
+
+    rate_key = settings.http_rate_key or settings.public_rate_key
+    add(
+        "http_ingress",
+        "error"
+        if settings.http_limits_enabled and rate_key is None
+        else "ok"
+        if settings.http_limits_enabled
+        else "warning",
+        "HTTP 入口保护已启用；所有实例须共享数据库与密钥。"
+        if settings.http_limits_enabled and rate_key
+        else "HTTP 入口保护未启用或缺少密钥；生产启用前检查部署配置。",
+    )
 
     try:
         with engine.connect() as connection:

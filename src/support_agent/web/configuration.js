@@ -581,22 +581,49 @@ export async function knowledgePage(ctx) {
             b.name,
             status(b.status),
             actions(
-              button("查看资料", () => guard(ctx, () => open(b))),
+              b.status === "deleting"
+                ? message("正在清理，资料操作已停用。")
+                : button("查看资料", () => guard(ctx, () => open(b))),
               admin(ctx)
                 ? button(
-                    "删除知识库",
-                    () =>
+                    b.status === "deleting" ? "继续清理" : "删除知识库",
+                    (event) =>
                       guard(ctx, async () => {
-                        if (
-                          !confirm(
-                            "确认删除整个知识库及其文档？现有引用将失效。",
+                        const control = event.currentTarget;
+                        control.disabled = true;
+                        try {
+                          const preview = await ctx.api(
+                            `/knowledge-bases/${b.id}?preview=true`,
+                            { method: "DELETE" },
+                          );
+                          if (
+                            !confirm(
+                              `确认删除整个知识库及其文档？现有引用将失效。剩余 ${preview.remaining} 个文档，本次最多清理 ${preview.batch_size} 个。`,
+                            )
                           )
-                        )
-                          return;
-                        await ctx.api(`/knowledge-bases/${b.id}`, {
-                          method: "DELETE",
-                        });
-                        await ctx.refresh();
+                            return;
+                          let progress;
+                          try {
+                            progress = await ctx.api(`/knowledge-bases/${b.id}`, {
+                              method: "DELETE",
+                            });
+                          } catch (e) {
+                            if (e.status === 503) {
+                              ctx.notify("清理未完成，请稍后继续清理：" + e.message);
+                              await ctx.refresh();
+                              return;
+                            }
+                            throw e;
+                          }
+                          ctx.notify(
+                            progress
+                              ? `本次已清理 ${progress.deleted} 个文档，剩余 ${progress.remaining} 个。请继续清理。`
+                              : "知识库已删除。",
+                          );
+                          await ctx.refresh();
+                        } finally {
+                          control.disabled = false;
+                        }
                       }),
                     "danger",
                   )

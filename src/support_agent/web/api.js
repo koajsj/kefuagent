@@ -1,5 +1,7 @@
 import { readEvents } from "./stream.js";
 const errors = {
+  http_limit_exceeded: "请求或连接过于频繁，请稍后重试。",
+  ingress_unavailable: "请求准入暂不可用，请稍后重试。",
   public_rate_key_unavailable:
     "部署管理员尚未配置 PUBLIC_RATE_KEY，暂不能创建访客会话。",
   invalid_provider_url:

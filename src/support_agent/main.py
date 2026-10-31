@@ -1,7 +1,10 @@
 import asyncio
+import json
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
+from importlib.metadata import version
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -30,6 +33,7 @@ from support_agent.config import Settings
 from support_agent.db import build_database, check_database
 from support_agent.dependencies import Database
 from support_agent.errors import AppError
+from support_agent.observability import request_id as request_id_context
 from support_agent.providers import OpenAICompatibleProvider
 from support_agent.retrieval import PostgresFTSRetriever
 from support_agent.schemas import ErrorOut
@@ -59,17 +63,22 @@ def create_app(settings: Settings | None = None):
         finally:
             if app.state.stream_jobs:
                 await asyncio.gather(*list(app.state.stream_jobs), return_exceptions=True)
+            if app.state.ingress_jobs:
+                await asyncio.gather(*list(app.state.ingress_jobs), return_exceptions=True)
             engine.dispose()
 
     app = FastAPI(
         title="通用多租户客服平台",
-        version="0.7.1",
+        version=version("support-agent-platform"),
         lifespan=lifespan,
         description="Tenant-scoped knowledge, verified-extract RAG and bounded, authorized read-only tool execution.",
         responses={
             code: {"model": ErrorOut} for code in [401, 403, 404, 409, 413, 422, 429, 500, 503]
         },
     )
+    from support_agent.http_limits import IngressMiddleware
+
+    app.state.ingress_jobs = set()
     app.state.stream_jobs = set()
     app.state.settings = settings
     app.state.engine = engine
@@ -87,7 +96,9 @@ def create_app(settings: Settings | None = None):
 
     @app.middleware("http")
     async def trace(request: Request, call_next):
-        request.state.request_id = uuid4()
+        started = time.monotonic()
+        request.state.request_id = getattr(request.state, "request_id", None) or uuid4()
+        request_id_context.set(str(request.state.request_id))
         upload_path = request.method == "POST" and re.fullmatch(
             r"/api/v1/knowledge-bases/[0-9a-fA-F-]{36}/documents", request.url.path
         )
@@ -123,11 +134,16 @@ def create_app(settings: Settings | None = None):
 
         route = request.scope.get("route")
         logger.info(
-            "request id=%s method=%s route=%s status=%d",
-            request.state.request_id,
-            request.method,
-            getattr(route, "path", "unmatched"),
-            response.status_code,
+            json.dumps(
+                {
+                    "event": "http_request",
+                    "request_id": str(request.state.request_id),
+                    "method": request.method,
+                    "route": getattr(route, "path", "unmatched"),
+                    "status": response.status_code,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000),
+                }
+            )
         )
         return response
 
@@ -245,4 +261,7 @@ def create_app(settings: Settings | None = None):
     def widget():
         return FileResponse(web / "widget.js", media_type="text/javascript")
 
+    app.add_middleware(
+        IngressMiddleware, sessions=sessions, settings=settings, pending=app.state.ingress_jobs
+    )
     return app
