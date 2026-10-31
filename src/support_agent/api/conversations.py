@@ -1,6 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from support_agent.dependencies import Database, TenantContext
@@ -140,3 +141,26 @@ def handling(
     context: TenantContext,
 ):
     return conversations.set_handling(db, context, conversation_id, data, request)
+
+
+@router.post(
+    "/{conversation_id}/agent-turns/stream",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "SSE stage/delta/completed/pending/failed/timed_out; 200 is not a success outcome",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        }
+    },
+)
+def stream_turn(
+    conversation_id: UUID,
+    data: AgentTurnInput,
+    request: Request,
+    db: Database,
+    context: TenantContext,
+):
+    from support_agent.streaming import response
+
+    get_owned(db, Conversation, context, conversation_id)
+    return response(request, context, conversation_id, data)

@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 from phase2_support import (
+    config,
     private_settings,  # noqa: F401
 )
 
@@ -194,3 +195,137 @@ def test_ssrf_dns_pinning_and_real_worker(monkeypatch):
             runtime={"timeout_seconds": 3, "max_output_tokens": 10, "temperature": 0},
         )
     assert denied.value.category == "unsafe_endpoint"
+
+
+def test_versioned_rotation_and_retention_are_atomic_tenant_scoped(platform, monkeypatch):
+    import base64
+    import os
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    from pydantic import SecretStr
+    from sqlalchemy import select
+
+    from support_agent.credentials import Keyring
+    from support_agent.db import set_tenant
+    from support_agent.errors import AppError
+    from support_agent.maintenance import rotate_credentials, rotation_plan
+    from support_agent.models import AuditEvent, Conversation, Message, ModelCredential
+    from support_agent.retention import apply_retention, retention_plan
+
+    c, app, _, tenants, hs, _, _ = platform
+    a = hs[0]
+    tenant = UUID(tenants[0]["id"])
+    _, foreign_id, _ = config(c, hs[1])
+    _, credential_id, secret = config(c, a)
+    credential_id = UUID(credential_id)
+    settings = app.state.settings.model_copy(
+        update={
+            "credential_keyring": SecretStr(
+                json.dumps({"next": base64.urlsafe_b64encode(os.urandom(32)).decode()})
+            ),
+            "credential_active_key": "next",
+        }
+    )
+    ring = Keyring(settings)
+    with app.state.sessions() as db:
+        plan = rotation_plan(db, tenant, ring, "next")
+        assert plan["counts"] == {"legacy": 1}
+        assert secret not in str(plan)
+
+        def fail(*_):
+            raise RuntimeError("simulated interrupted transaction")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(db, "commit", fail)
+            with pytest.raises(RuntimeError):
+                rotate_credentials(db, tenant, ring, "next", plan["confirmation"])
+        db.rollback()
+        set_tenant(db, tenant)
+        row = db.get(ModelCredential, credential_id)
+        assert ring.version(row.encrypted_secret) == "legacy"
+        db.rollback()
+        rotate_credentials(db, tenant, ring, "next", plan["confirmation"])
+        set_tenant(db, tenant)
+        row = db.get(ModelCredential, credential_id)
+        assert ring.version(row.encrypted_secret) == "next"
+        assert ring.open(tenant, row.ref, row.encrypted_secret) == secret
+        with pytest.raises(AppError):
+            ring.open(UUID(tenants[1]["id"]), row.ref, row.encrypted_secret)
+        with pytest.raises(AppError):
+            ring.open(tenant, "cred_wrong", row.encrypted_secret)
+        without_new = Keyring(app.state.settings)
+        with pytest.raises(AppError):
+            without_new.open(tenant, row.ref, row.encrypted_secret)
+        set_tenant(db, UUID(tenants[1]["id"]))
+        foreign = db.get(ModelCredential, UUID(foreign_id))
+        assert ring.version(foreign.encrypted_secret) == "legacy"
+        set_tenant(db, tenant)
+        assert not rotation_plan(db, tenant, ring, "next")["affected"]
+        db.rollback()
+        original_settings = app.state.settings
+        app.state.settings = settings
+        created = c.post(
+            "/api/v1/model-credentials",
+            headers=a,
+            json={"ref": "cred_new", "api_key": "synthetic-new-key"},
+        )
+        assert created.status_code == 201
+        set_tenant(db, tenant)
+        current = db.get(ModelCredential, UUID(created.json()["id"]))
+        assert ring.version(current.encrypted_secret) == "next"
+        assert ring.open(tenant, current.ref, current.encrypted_secret) == "synthetic-new-key"
+        app.state.settings = original_settings
+        back = rotation_plan(db, tenant, ring, "legacy")
+        rotate_credentials(db, tenant, ring, "legacy", back["confirmation"])
+        set_tenant(db, tenant)
+        row = db.get(ModelCredential, credential_id)
+        assert ring.version(row.encrypted_secret) == "legacy"
+        db.rollback()
+
+    # New, isolated records only: deletion does not touch existing test data.
+    cid = c.post("/api/v1/conversations", headers=a, json={}).json()["id"]
+    c.post(
+        f"/api/v1/conversations/{cid}/messages",
+        headers=a,
+        json={"role": "user", "content": "synthetic private content"},
+    )
+    c.patch(f"/api/v1/conversations/{cid}", headers=a, json={"status": "closed"})
+    cid = UUID(cid)
+    with app.state.sessions.begin() as db:
+        set_tenant(db, tenant)
+        row = db.get(Conversation, cid)
+        row.updated_at = datetime.now(UTC) - timedelta(days=40)
+        for message in db.scalars(select(Message).where(Message.conversation_id == cid)):
+            message.created_at = datetime.now(UTC) - timedelta(days=40)
+    policy = SimpleNamespace(
+        conversations_days=30, visitors_days=7, calls_days=30, audit_days=None, batch_size=10
+    )
+    with app.state.sessions() as db:
+        preview = retention_plan(db, tenant, policy)
+        assert preview["counts"]["conversations"] == 1
+        with pytest.raises(ValueError):
+            apply_retention(db, tenant, policy, "wrong", app.state.storage)
+        db.rollback()
+        with monkeypatch.context() as patch:
+            patch.setattr(db, "commit", fail)
+            with pytest.raises(RuntimeError):
+                apply_retention(db, tenant, policy, preview["confirmation"], app.state.storage)
+        db.rollback()
+        set_tenant(db, tenant)
+        assert db.get(Conversation, cid) is not None
+        db.rollback()
+        apply_retention(db, tenant, policy, preview["confirmation"], app.state.storage)
+        set_tenant(db, tenant)
+        assert db.get(Conversation, cid) is None
+        assert not db.scalar(select(Message.id).where(Message.conversation_id == cid))
+        assert db.scalar(
+            select(AuditEvent.id).where(
+                AuditEvent.action == "retention.execute", AuditEvent.tenant_id == tenant
+            )
+        )
+        assert retention_plan(db, tenant, policy)["counts"]["conversations"] == 0
+        assert apply_retention(db, tenant, policy, preview["confirmation"], app.state.storage) == {
+            "already_applied": True
+        }

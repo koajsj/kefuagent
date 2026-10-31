@@ -72,7 +72,7 @@ class SearchHit(Output):
     page: int | None
     section: str | None
     generation: int
-    strategy: Literal["postgres_fts", "postgres_fts_cjk"] = "postgres_fts"
+    strategy: Literal["postgres_fts", "postgres_fts_cjk", "postgres_rrf"] = "postgres_fts"
 
 
 class KnowledgeBindings(Input):

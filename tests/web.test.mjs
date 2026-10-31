@@ -61,3 +61,15 @@ test("blocked browser storage still supports tab-local visitor and idempotency s
   assert.equal(sessionState.get("support.test"), null);
   delete globalThis.sessionStorage;
 });
+
+test("SSE preserves split UTF-8, returns only terminal results and rejects interrupted delivery", async () => {
+  const { readEvents } = await import("../src/support_agent/web/stream.js");
+  const raw = new TextEncoder().encode('event: delta\ndata: {"text":"中文"}\n\nevent: completed\ndata: {"status":"answered","answer":"中文"}\n\n');
+  const make = (bytes) => new Response(new ReadableStream({start(c) { for (const byte of bytes) c.enqueue(Uint8Array.of(byte)); c.close(); }}), {headers: {"content-type":"text/event-stream"}});
+  const events = [];
+  assert.equal((await readEvents(make(raw), (e, d) => events.push([e, d]))).answer, "中文");
+  assert.equal(events[0][1].text, "中文");
+  let discarded = false;
+  await assert.rejects(readEvents(make(raw.slice(0, 20)), (e) => { if (e === "discard") discarded = true; }), /未知/);
+  assert.equal(discarded, true);
+});

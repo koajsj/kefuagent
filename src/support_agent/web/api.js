@@ -1,3 +1,4 @@
+import { readEvents } from "./stream.js";
 const errors = {
   public_rate_key_unavailable:
     "部署管理员尚未配置 PUBLIC_RATE_KEY，暂不能创建访客会话。",
@@ -75,6 +76,14 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
           cache: "no-store",
         });
         if (epoch !== generation) throw new StaleResponse();
+        if (response.ok && options.onEvent) {
+          const result = await readEvents(response, (event, value) => {
+            if (epoch !== generation) throw new StaleResponse();
+            options.onEvent(event, value);
+          });
+          if (epoch !== generation) throw new StaleResponse();
+          return result;
+        }
         const value = response.status === 204 ? null : await response.json();
         if (epoch !== generation) throw new StaleResponse();
         if (!response.ok) {
@@ -90,6 +99,7 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
         }
         return value;
       } catch (error) {
+        if (error.code === "authentication_required") unauthorized();
         if (epoch !== generation) throw new StaleResponse();
         if (error instanceof TypeError)
           throw new Error(

@@ -1,6 +1,6 @@
-from sqlalchemy import select
+from sqlalchemy import select, text
 
-from support_agent.credentials import decrypt_secret, encrypt_secret
+from support_agent.credentials import Keyring
 from support_agent.errors import AppError
 from support_agent.models import ModelCredential
 from support_agent.providers import validate_base_url
@@ -9,14 +9,17 @@ from support_agent.services.audit import record
 from support_agent.services.resources import get_owned
 
 
-def master_key(request):
-    value = request.app.state.settings.credential_master_key
-    return value.get_secret_value() if value else None
+def credential_lock(db, tenant_id):
+    db.execute(
+        text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key,0))"),
+        {"key": "credential-rotation:" + str(tenant_id)},
+    )
 
 
 def create_credential(db, context, data, request):
-    encrypted = encrypt_secret(
-        master_key(request), context.tenant_id, data.ref, data.api_key.get_secret_value()
+    credential_lock(db, context.tenant_id)
+    encrypted = Keyring(request.app.state.settings).seal(
+        context.tenant_id, data.ref, data.api_key.get_secret_value()
     )
     row = ModelCredential(
         tenant_id=context.tenant_id,
@@ -32,13 +35,14 @@ def create_credential(db, context, data, request):
 
 
 def update_credential(db, context, credential_id, data, request):
+    credential_lock(db, context.tenant_id)
     row = get_owned(db, ModelCredential, context, credential_id, lock=True)
     if row.ref != data.ref:
         raise AppError(
             409, "credential_ref_immutable", "Create a new credential reference instead of renaming"
         )
-    row.encrypted_secret = encrypt_secret(
-        master_key(request), context.tenant_id, row.ref, data.api_key.get_secret_value()
+    row.encrypted_secret = Keyring(request.app.state.settings).seal(
+        context.tenant_id, row.ref, data.api_key.get_secret_value()
     )
     row.enabled = data.enabled
     record(db, request, "credential.update", "credential", row.id, tenant_id=context.tenant_id)
@@ -47,6 +51,7 @@ def update_credential(db, context, credential_id, data, request):
 
 
 def delete_credential(db, context, credential_id, request):
+    credential_lock(db, context.tenant_id)
     row = get_owned(db, ModelCredential, context, credential_id, lock=True)
     db.delete(row)
     record(
@@ -90,8 +95,8 @@ def resolve_config(db, context, config, request, *, snapshot=False):
         raise AppError(
             409, "credential_unavailable", "An enabled credential in this tenant is required"
         )
-    secret = decrypt_secret(
-        master_key(request), context.tenant_id, credential.ref, credential.encrypted_secret
+    secret = Keyring(request.app.state.settings).open(
+        context.tenant_id, credential.ref, credential.encrypted_secret
     )
     kwargs = {
         "base_url": url,

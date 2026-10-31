@@ -723,3 +723,56 @@ def test_provider_sends_native_tools_and_validates_response(monkeypatch):
     with pytest.raises(providers.ProviderFailure) as failure:
         providers.parse_completion(json.dumps(bad).encode(), 1, allow_tools=True)
     assert failure.value.category == "invalid_response"
+
+
+def test_sse_reuses_turn_idempotency_and_never_delivers_failed_text(platform):
+    import json
+
+    from support_agent.providers import Completion, ProviderFailure
+
+    c, app, _, _, hs, _, _ = platform
+    a = hs[0]
+    cfg, _, _ = config(c, a)
+    cid = c.post("/api/v1/conversations", headers=a, json={}).json()["id"]
+    payload = {"agent_config_id": cfg, "content": "hello", "idempotency_key": str(uuid4())}
+
+    class Provider:
+        count = 0
+
+        def complete(self, **kwargs):
+            self.count += 1
+            return Completion("可核对的客服答复" * 20, 12, 8)
+
+    provider = Provider()
+    app.state.provider = provider
+    endpoint = f"/api/v1/conversations/{cid}/agent-turns/stream"
+    r = c.post(endpoint, headers=a, json=payload)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/event-stream")
+    frames = [
+        (part.splitlines()[0][7:], json.loads(part.splitlines()[1][6:]))
+        for part in r.text.strip().split("\n\n")
+        if part.startswith("event:")
+    ]
+    assert frames[0][0] == "stage"
+    result = next(data for event, data in frames if event == "completed")
+    assert "".join(data["text"] for event, data in frames if event == "delta") == result["answer"]
+    assert result["status"] == "answered"
+    assert c.post(endpoint, headers=a, json=payload).status_code == 200
+    assert provider.count == 1
+    assert (
+        c.post(f"/api/v1/conversations/{cid}/agent-turns", headers=a, json=payload).json()[
+            "call_id"
+        ]
+        == result["call_id"]
+    )
+
+    class Timeout:
+        def complete(self, **kwargs):
+            raise ProviderFailure("timeout", attempts=None)
+
+    app.state.provider = Timeout()
+    payload["idempotency_key"] = str(uuid4())
+    r = c.post(endpoint, headers=a, json=payload)
+    assert "event: timed_out" in r.text and "event: delta" not in r.text
+    assert c.get(f"/api/v1/conversations/{cid}/messages", headers=a).json()[-1]["role"] == "user"

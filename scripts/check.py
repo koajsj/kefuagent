@@ -38,7 +38,7 @@ def main():
         ([sys.executable, "-m", "pytest"], None),
     ]
     for command, env in checks:
-        result = subprocess.run(command, env=env)
+        result = subprocess.run(command, env=env, timeout=60 if "pytest" in command else 30)
         if result.returncode:
             raise SystemExit(result.returncode)
 

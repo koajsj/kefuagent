@@ -2,6 +2,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 
 from support_agent.dependencies import Database, TenantAdmin
 from support_agent.models import Publication
@@ -113,3 +114,19 @@ def status(request: Request, db: Database, context: Visitor):
         .limit(1)
     )
     return reconcile_expired(db, context, [row], request)[0] if row else None
+
+
+@router.post(
+    "/public/{pid}/sessions/{sid}/turns/stream",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "SSE stage/delta/completed/pending/failed/timed_out; 200 is not a success outcome",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        }
+    },
+)
+def stream_turn(data: VisitorTurn, request: Request, db: Database, context: Visitor):
+    from support_agent.streaming import response
+
+    return response(request, context, context.conversation_id, data, public=True)

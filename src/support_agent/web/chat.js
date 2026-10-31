@@ -269,8 +269,7 @@ export async function chatPage(ctx) {
       inline.replaceChildren();
       runState.textContent = "正在提交…";
       const keyName = "support.pending." + ctx.tenant + "." + cid;
-      const timer = setInterval(() => readRuns().catch(() => {}), 1200);
-      stopPoll = () => clearInterval(timer);
+      stopPoll = () => {};
       try {
         if (human) {
           await ctx.api(`/conversations/${cid}/messages`, {
@@ -290,14 +289,23 @@ export async function chatPage(ctx) {
           }
           const identity = await requestIdentity(payload, previous);
           sessionState.set(keyName, JSON.stringify(identity));
-          const response = await ctx.api(`/conversations/${cid}/agent-turns`, {
+          const preview = el("p", { class: "message assistant", "aria-live": "polite" });
+          inline.append(preview);
+          const response = await ctx.api(`/conversations/${cid}/agent-turns/stream`, {
             method: "POST",
             body: { ...payload, idempotency_key: identity.key },
+            onEvent(event, value) {
+              if (!ctx.isCurrent() || selected?.id !== cid) return;
+              if (event === "stage") runState.textContent = PHASES[value.phase] || value.phase;
+              if (event === "delta") preview.textContent += value.text;
+              if (event === "discard") preview.textContent = "";
+            },
           });
           if (response.status === "running") {
             inline.append(message("原请求仍在执行，请稍后使用相同内容重试。"));
             return;
           }
+          preview.remove();
           sessionState.remove(keyName);
           if (response.error_category)
             inline.append(

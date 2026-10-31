@@ -1,3 +1,4 @@
+import { readEvents } from "./stream.js";
 import { sessionState } from "./storage.js";
 import {
   el,
@@ -47,6 +48,7 @@ async function api(path = "", options = {}) {
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
+  if (response.ok && options.onEvent) return readEvents(response, options.onEvent);
   const result = response.status === 204 ? null : await response.json();
   if (!response.ok) {
     const err = new Error(
@@ -169,10 +171,16 @@ function render() {
     try {
       pending = await requestIdentity({ content }, pending);
       save();
-      poll = setInterval(() => runtime().catch(() => {}), 1500);
-      const result = await api(`/sessions/${session.id}/turns`, {
+      const preview = el("article", { class: "message assistant", "aria-live": "polite" });
+      feedback.append(preview);
+      const result = await api(`/sessions/${session.id}/turns/stream`, {
         method: "POST",
         body: { content, idempotency_key: pending.key },
+        onEvent(event, value) {
+          if (event === "stage") runs.textContent = { pending: "等待执行", retrieving: "检索知识中", model_running: "模型请求中", tool_running: "只读工具执行中" }[value.phase] || value.phase;
+          if (event === "delta") preview.textContent += value.text;
+          if (event === "discard") preview.textContent = "";
+        },
       });
       if (result.status !== "running") {
         pending = null;

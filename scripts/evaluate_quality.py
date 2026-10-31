@@ -1,5 +1,7 @@
-"""Explicit offline evaluation only. Does not contain a live provider mode or credentials."""
+"""Offline test-data evaluation, never a live Provider runner."""
 
+import argparse
+import json
 import os
 import subprocess
 import sys
@@ -9,9 +11,14 @@ from uuid import uuid4
 from sqlalchemy.engine import make_url
 
 from support_agent.config import Settings
+from support_agent.evaluation import markdown
 
 
 def main():
+    parser = argparse.ArgumentParser(description="离线 Mock 客服质量与检索评测，不调用真实模型")
+    parser.add_argument("--compare", type=Path, help="比较同版本数据集报告")
+    parser.add_argument("--output", type=Path, default=Path(".local/evaluations"))
+    args = parser.parse_args()
     settings = Settings()
     if "TEST_DATABASE_URL" not in os.environ:
         url = make_url(settings.database_url.get_secret_value())
@@ -22,18 +29,27 @@ def main():
         )
     if "test" not in make_url(os.environ["TEST_DATABASE_URL"]).database:
         raise SystemExit("Refusing a non-test database")
-    directory = Path(".local/evaluations")
-    directory.mkdir(parents=True, exist_ok=True)
-    report = directory / f"quality-offline-{uuid4().hex}.json"
+    args.output.mkdir(parents=True, exist_ok=True)
+    report = args.output / f"quality-offline-{uuid4().hex}.json"
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "tests/test_quality.py", "-q", "--tb=short"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/test_quality.py::test_offline_customer_quality_set",
+            "-q",
+            "--tb=short",
+        ],
         env=os.environ | {"P4_EVAL_REPORT": str(report.resolve())},
         check=False,
     )
     if result.returncode:
         raise SystemExit(result.returncode)
-    print("Offline mock mechanics report:", report.resolve())
-    print("Real model and semantic answer quality: NOT VERIFIED")
+    data = json.loads(report.read_text())
+    previous = json.loads(args.compare.read_text()) if args.compare else None
+    report.with_suffix(".md").write_text(markdown(data, previous))
+    print("Offline mechanical report:", report.resolve())
+    print("Real model and semantic answer quality: NOT_EVALUATED")
 
 
 if __name__ == "__main__":

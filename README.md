@@ -2,7 +2,7 @@
 
 可独立部署的多租户客服产品：管理工作台、知识库、模型凭证、客服会话、只读工具、公开客服链接和网站嵌入。Python / FastAPI / PostgreSQL 模块化单体；没有行业连接器、任意代码插件、Redis、Celery 或向量服务。
 
-**当前 0.5.1（P6）完成本机离线及 Mock 验收，不调用真实模型，不产生模型 API 费用。** 保留 OpenAI-compatible Provider，支持部署方批准的自定义公网 HTTPS Base URL、第三方 API Key 与 Model ID。离线演示是确定性流程演示，不能代替真实 AI 客服质量验收；生产环境也尚未验收。本次发布整合 P4/P5 及 P6 验收修正，完整证据和未验证范围见 [验收记录](docs/ACCEPTANCE.md)。
+**当前 0.6.0（P7）**：增加可比较的离线质量评测、中英词面多路召回/RRF、SSE 运行阶段与安全分段交付、版本化主密钥维护 CLI、默认关闭的数据保留 CLI 和 GitHub CI。保留 OpenAI-compatible 自定义公网 HTTPS Base URL、第三方 Key/Model ID、模型路由及备用机制。真实模型效果、浏览器 GUI 和生产部署尚未验收；小型合成集与 Mock 结果不能代替客服质量。P7 实际状态见 [P7 验收](docs/P7_ACCEPTANCE.md)，历史 [P6 验收](docs/ACCEPTANCE.md) 保留。
 
 ## 本机启动
 
@@ -47,13 +47,15 @@ uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8
 | WEB_ORIGIN | Web/API 的精确同源地址；本机回环可 HTTP，其他地址必须 HTTPS |
 | SESSION_HOURS | 管理会话有效期，默认 12 小时 |
 | DOCUMENT_STORAGE_ROOT | 私有文档目录，默认 `.local/documents`，不得位于公共静态目录或备份目录 |
-| CREDENTIAL_MASTER_KEY | 外部保管的 32 随机字节 base64url 主密钥，无默认值 |
+| CREDENTIAL_MASTER_KEY | 旧格式 32 随机字节 base64url 主密钥，无默认值；旧密文/备份仍需保留 |
+| CREDENTIAL_KEYRING / CREDENTIAL_ACTIVE_KEY | 受保护的版本→主密钥 JSON / 活动 ID；见密钥维护文档 |
+| RETENTION_*_DAYS | 默认空、不自动删除；须用 CLI 预览及确认执行 |
 | PUBLIC_RATE_KEY | 独立至少 32 随机字符，用于匿名 IP 限流 HMAC；缺失时公开会话初始化返回 503 |
 | MODEL_ALLOWED_HOSTS | 精确批准主机 JSON 数组，默认 `[]`，例如 `["api.provider.example"]` |
 | ALLOW_EXTERNAL_MODELS | 默认 false；部署方确定模型能力和费用后才显式开启。本阶段未开启真实调用 |
 | TENANT/USER/AGENT_* | PostgreSQL 持久化分钟/并发/UTC 日 Token 保守预算，详见示例与用量页面 |
 
-缺少主密钥仍可启动并使用离线演示；保存/解密凭证会安全失败。密钥的一次性生成方法见部署文档。**主密钥与数据库密文匹配，丢失将无法恢复 API Key；禁止每次重启重新生成或直接替换。** 主密钥轮换目前只有安全停机方案，未交付未验证的轮换命令。普通企业 API Key 更新/停用/删除已实现。
+缺少主密钥仍可启动并使用离线演示；保存/解密凭证会安全失败。密钥的一次性生成方法见部署文档。**主密钥与数据库密文匹配，丢失将无法恢复 API Key；禁止每次重启重新生成或直接替换。** 主密钥轮换提供维护窗口内的版本兼容读取、单企业原子重加密、检查和反向恢复 CLI，见 [维护说明](docs/P7_RUNTIME.md)；不提供无停机配置分发。普通企业 API Key 更新/停用/删除已实现。
 
 第三方兼容模型示例（仅示意，需自行提供合法 Endpoint/模型）：
 
@@ -80,7 +82,7 @@ uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8
 
 凭证通过 `/api/v1/model-credentials` 保存 `{ref, api_key, enabled}`，ref 以 `cred_` 开头。API Key 不强制 `sk-` 格式，只校验安全认证头字符/长度；AES-256-GCM 随机 nonce，AAD 绑定企业及不可重命名引用。API、日志不返回明文或密文。在途轮换/删除阻止旧结果交付，保留真实可得用量。
 
-Base URL 可自定义，但必须通过部署方白名单、HTTPS:443、公网 DNS 和固定 IP 连接检查。禁止数字 IP、私网、回环、用户信息、查询参数、跳转和环境代理。自建服务需要批准的公网 HTTPS 域名，暂不支持内网模型。Token 参数、温度、Tool Calling 是管理员能力声明，不能证明厂商兼容。当前适配非流式 Chat Completions，不支持厂商私有协议、Responses 或任意自定义认证头。无工具能力模型在确需工具时明确失败/按配置降级，不伪装成功。
+Base URL 可自定义，但必须通过部署方白名单、HTTPS:443、公网 DNS 和固定 IP 连接检查。禁止数字 IP、私网、回环、用户信息、查询参数、跳转和环境代理。自建服务需要批准的公网 HTTPS 域名，暂不支持内网模型。Token 参数、温度、Tool Calling 是管理员能力声明，不能证明厂商兼容。上游适配非流式 Chat Completions；前端 SSE 实时显示阶段，答案经检查、持久化后分段交付，不承诺上游逐 token 首字延迟。不支持厂商私有协议、Responses 或任意自定义认证头。无工具能力模型在确需工具时明确失败/按配置降级，不伪装成功。
 
 主/备用与 qa/extraction/reasoning 路由共享当前 Provider/凭证。只对明确模型不可用或不支持工具尝试备用；认证、未知网络结果、超时不盲目切换。有限 HTTP 重试与未知用量规则见 [运行安全](docs/OPERATIONS.md)。ChatGPT 订阅不是 API Key。
 
@@ -102,12 +104,12 @@ Base URL 可自定义，但必须通过部署方白名单、HTTPS:443、公网 D
 
 ## 知识、工具与历史边界
 
-- 中文二字组 + GIN 和英文 `simple` FTS，带少量通用同义词扩展，无向量/语义检索。词面召回不保证语义相关；无法识别所有冲突或提示注入。
+- 中文二字组 + GIN 和英文 `simple` FTS，中英词汇扩展、有界多路召回、统一多 KB 合并/RRF，无向量/语义模型检索。词面召回不保证语义相关；无法识别所有冲突或提示注入。
 - 绑定知识库的 Agent 可在同一轮检索、调用工具，再让模型选择引用。服务器核对当前企业/知识授权、文档版本、逐字原文后构造摘录答案。`grounded=true` 只证明来源/摘录通过校验，不证明文档真实或语义充分；无证据/明确冲突时 unresolved。
 - 保留原 `/chat` 与 `/agent-turns` API；无知识绑定的普通对话是未验证模型文字。演示 Provider 只演示固定回答、检索原文与文本统计，不能验证真实中文多轮推理。
 - 最多 5 次推理、4 次工具、整轮 120 秒；工具与解析有隔离子进程和资源上限，**不是恶意插件安全沙箱**。写工具/审批仍禁止。
 - 请求作用域 `(tenant, conversation, idempotency_key)`；同键同输入重放，不同输入 409。浏览器对结果未知的 AI 发送复用原标识；人工录入回复没有幂等保证，网络中断后先核实历史。
-- 查询运行阶段可区分检索/模型/工具/完成/失败，租约过期归类未知结果，不自动重发。已撤权工具或公开已失效知识来源的历史 payload 会被遮蔽；数据库仍保留已发生记录，不等于全链路隐私擦除。
+- 新增内部和访客 `/stream` SSE（非流式接口保留），可区分检索/模型/工具/完成/失败，租约过期归类未知结果，不自动重发。已撤权工具或公开已失效知识来源的历史 payload 会被遮蔽；数据库仍保留已发生记录，不等于全链路隐私擦除。
 
 ## API 与结构
 
@@ -146,10 +148,12 @@ uv run python scripts/check.py
 node --test tests/web.test.mjs
 ```
 
-检查脚本执行 Ruff、格式、dev/test Alembic 差异和有界 PostgreSQL/Mock 回归。外部环境必须指定独立 TEST_DATABASE_URL（库名含 test），不模拟真实数据库、不清库；测试只追加随机数据并删除自身创建的文档。P4 历史基线为 40 项测试，P5 实际结果与未验证范围见 [验收记录](docs/ACCEPTANCE.md)。
+检查脚本执行 Ruff、格式、dev/test Alembic 差异和有界 PostgreSQL/Mock 回归。外部环境必须指定独立 TEST_DATABASE_URL（库名含 test），不模拟真实数据库、不清库；测试只追加随机数据并删除自身创建的文档。P6 基线 51 项 Python / 4 项 JS；P7 保留原回归，最多 54 / 5 项，Python 单次全量硬上限 60 秒。离线质量评测和 CI 说明见下方链接。
 
-已在本机隔离副本验证数据库、文档和密钥恢复；未进行真实模型、浏览器 GUI、生产 Linux/HTTPS 或负载验收；不承诺已完成生产质量验收。没有流式输出、匿名人机验证、审批写工具、完整人工工作台、自动保留/隐私擦除或在线主密钥轮换。内部成员共享企业会话，不是按席位/个人私有权限的客服系统。
+已在本机隔离副本验证数据库、文档和密钥恢复；未进行真实模型、浏览器 GUI、生产 Linux/HTTPS 或负载验收；不承诺已完成生产质量验收。SSE 只在最终校验后交付答案，尚无上游逐 token 输出、匿名人机验证、审批写工具、完整人工工作台、全链路隐私擦除或无停机密钥分发。保留策略默认关闭，CLI 执行需要显式确认。内部成员共享企业会话，不是按席位/个人私有权限的客服系统。
 
 常见问题：401 检查登录/访客令牌期限；403 检查成员角色、Origin 与企业；409 检查版本、忙会话与幂等键；413/422 检查文件与 Schema/地址白名单；503 检查数据库、主密钥、PUBLIC_RATE_KEY 和迁移。失败响应仅分类/关联 ID，不回显输入/堆栈。不要用清库或关闭安全校验解决。
+
+P7 专项：[离线质量评测与检索](docs/P7_QUALITY.md)、[SSE / 密钥轮换与恢复 / 数据保留 / CI](docs/P7_RUNTIME.md)。`uv run python scripts/evaluate_quality.py --compare OLD_REPORT.json` 可生成同版本比较；不提供默认开启的真实模型评测。
 
 详细资料：[架构](docs/ARCHITECTURE.md)、[开源来源](docs/OPEN_SOURCE_REUSE.md)、[运行安全与保留](docs/OPERATIONS.md)、[Linux/备份/升级](docs/DEPLOYMENT.md)。本项目当前不接入任何行业系统。项目代码采用 [MIT License](LICENSE)，版权署名 koajsj；第三方依赖保留各自许可证，见 [依赖授权](docs/DEPENDENCY_LICENSES.md)。

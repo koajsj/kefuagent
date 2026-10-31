@@ -23,6 +23,7 @@ from support_agent.models import (
 )
 from support_agent.services.audit import record
 from support_agent.services.resources import get_owned
+from support_agent.stream_events import notify
 from support_agent.tool_runtime import ToolFailure
 
 
@@ -323,6 +324,7 @@ def invoke(db, context, call_id, model_tool_call, request, *, deadline=None):
         db.commit()
         return row
     call.phase = "tool_running"
+    notify(request, "tool_running")
     audit_execution(db, context, row, request, "start")
     execution_id = row.id
     tool_context = replace(

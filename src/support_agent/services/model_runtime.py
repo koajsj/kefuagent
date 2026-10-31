@@ -14,6 +14,7 @@ from support_agent.providers import ProviderFailure
 from support_agent.schemas import ModelTarget, RuntimeConfig
 from support_agent.services.model_configs import resolve_config
 from support_agent.services.resources import get_owned
+from support_agent.stream_events import notify
 
 
 def select_target(config, task, require_tools):
@@ -148,6 +149,7 @@ def complete(
             call.steps = [*call.steps, step]
             step_index = len(call.steps) - 1
             db.commit()
+            notify(request, "model_running")
         except (AppError, ProviderFailure) as exc:
             category = exc.code if isinstance(exc, AppError) else exc.category
             db.rollback()

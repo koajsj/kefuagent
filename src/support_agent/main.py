@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from contextlib import asynccontextmanager
@@ -56,17 +57,20 @@ def create_app(settings: Settings | None = None):
         try:
             yield
         finally:
+            if app.state.stream_jobs:
+                await asyncio.gather(*list(app.state.stream_jobs), return_exceptions=True)
             engine.dispose()
 
     app = FastAPI(
         title="通用多租户客服平台",
-        version="0.5.1",
+        version="0.6.0",
         lifespan=lifespan,
         description="Tenant-scoped knowledge, verified-extract RAG and bounded, authorized read-only tool execution.",
         responses={
             code: {"model": ErrorOut} for code in [401, 403, 404, 409, 413, 422, 429, 500, 503]
         },
     )
+    app.state.stream_jobs = set()
     app.state.settings = settings
     app.state.engine = engine
     app.state.sessions = sessions

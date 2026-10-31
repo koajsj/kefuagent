@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 
 from support_agent.models import Document, DocumentChunk, KnowledgeBase
 from support_agent.rag_schemas import SearchHit
-from support_agent.search_text import HAN, coverage, query_expression, query_groups
+from support_agent.search_text import coverage, latin_expression, query_expression, query_groups
 from support_agent.services.knowledge import active_base
 
 _INJECTION = re.compile(
@@ -31,64 +31,77 @@ class PostgresFTSRetriever:
     def search(self, db, context, knowledge_base_ids, query, limit=6):
         for kid in knowledge_base_ids:
             active_base(db, context, kid)
-        chinese = bool(HAN.search(query))
-        groups = query_groups(query) if chinese else []
-        expression = query_expression(groups)
-        if chinese and not expression:
-            return []
-        tsquery = (
-            func.to_tsquery("simple", expression)
-            if chinese
-            else func.plainto_tsquery("simple", query)
+        groups = query_groups(query)
+        lanes = [
+            (DocumentChunk.chinese_vector, query_expression(groups)),
+            (DocumentChunk.search_vector, latin_expression(groups)),
+        ]
+        candidates = {}
+        fused = {}
+        # Each lane covers all authorized KBs together; do not let a per-KB quota bias fusion.
+        for vector, expression in lanes:
+            if not expression:
+                continue
+            tsquery = func.to_tsquery("simple", expression)
+            score = func.ts_rank_cd(vector, tsquery, 32)
+            rows = db.execute(
+                select(DocumentChunk, Document.filename, score.label("score"))
+                .join(
+                    Document,
+                    (Document.tenant_id == DocumentChunk.tenant_id)
+                    & (Document.id == DocumentChunk.document_id),
+                )
+                .join(
+                    KnowledgeBase,
+                    (KnowledgeBase.tenant_id == Document.tenant_id)
+                    & (KnowledgeBase.id == Document.knowledge_base_id),
+                )
+                .where(
+                    DocumentChunk.tenant_id == context.tenant_id,
+                    Document.tenant_id == context.tenant_id,
+                    KnowledgeBase.tenant_id == context.tenant_id,
+                    Document.knowledge_base_id.in_(knowledge_base_ids),
+                    Document.status == "ready",
+                    KnowledgeBase.status == "active",
+                    DocumentChunk.generation == Document.generation,
+                    vector.op("@@")(tsquery),
+                    score >= 0.001,
+                )
+                .order_by(score.desc(), DocumentChunk.document_id, DocumentChunk.position)
+                .limit(60)
+            ).all()
+            for rank, (chunk, name, _) in enumerate(rows, 1):
+                if not reference_is_safe(chunk.content) or coverage(chunk.content, groups) < 0.4:
+                    continue
+                candidates[chunk.id] = (chunk, name)
+                fused[chunk.id] = fused.get(chunk.id, 0) + 1 / (60 + rank)
+        # A third lexical lane distinguishes intent coverage and headings among FTS candidates.
+        lexical = sorted(
+            candidates,
+            key=lambda cid: (
+                -coverage(candidates[cid][0].content, groups),
+                -coverage((candidates[cid][0].section or "") + " " + candidates[cid][1], groups),
+                str(candidates[cid][0].document_id),
+                candidates[cid][0].position,
+            ),
         )
-        vector = DocumentChunk.chinese_vector if chinese else DocumentChunk.search_vector
-        score = func.ts_rank_cd(vector, tsquery, 32)
-        rows = db.execute(
-            select(DocumentChunk, Document.filename, score.label("score"))
-            .join(
-                Document,
-                (Document.tenant_id == DocumentChunk.tenant_id)
-                & (Document.id == DocumentChunk.document_id),
-            )
-            .join(
-                KnowledgeBase,
-                (KnowledgeBase.tenant_id == Document.tenant_id)
-                & (KnowledgeBase.id == Document.knowledge_base_id),
-            )
-            .where(
-                DocumentChunk.tenant_id == context.tenant_id,
-                Document.tenant_id == context.tenant_id,
-                KnowledgeBase.tenant_id == context.tenant_id,
-                Document.knowledge_base_id.in_(knowledge_base_ids),
-                Document.status == "ready",
-                KnowledgeBase.status == "active",
-                DocumentChunk.generation == Document.generation,
-                vector.op("@@")(tsquery),
-                score >= 0.001,
-            )
-            .order_by(score.desc(), DocumentChunk.id)
-            .limit(min(60, limit * 6) if chinese else limit)
-        ).all()
-        if chinese:
-            rows = [(chunk, name, coverage(chunk.content, groups)) for chunk, name, _ in rows]
-            rows = sorted(
-                (row for row in rows if row[2] >= 0.4), key=lambda row: (-row[2], str(row[0].id))
-            )
+        for rank, cid in enumerate(lexical, 1):
+            fused[cid] += 1 / (60 + rank)
+        ordered = sorted(candidates, key=lambda cid: (-fused[cid], lexical.index(cid)))[:limit]
         return [
             SearchHit(
-                document_id=chunk.document_id,
-                document_name=name,
-                chunk_id=chunk.id,
-                content=chunk.content,
-                score=rank,
-                page=chunk.page,
-                section=chunk.section,
-                generation=chunk.generation,
-                strategy="postgres_fts_cjk" if chinese else "postgres_fts",
+                document_id=candidates[cid][0].document_id,
+                document_name=candidates[cid][1],
+                chunk_id=cid,
+                content=candidates[cid][0].content,
+                score=fused[cid],
+                page=candidates[cid][0].page,
+                section=candidates[cid][0].section,
+                generation=candidates[cid][0].generation,
+                strategy="postgres_rrf",
             )
-            for chunk, name, rank in rows
-            if reference_is_safe(chunk.content)
-        ][:limit]
+            for cid in ordered
+        ]
 
     def current_chunks(self, db, context, chunk_ids, *, lock=False):
         if lock and context.public_session_id is not None:

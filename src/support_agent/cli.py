@@ -2,7 +2,8 @@
 
 import argparse
 from getpass import getpass
-from uuid import uuid4
+from types import SimpleNamespace
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 from sqlalchemy import select, text
@@ -17,8 +18,26 @@ from support_agent.security import hash_password
 
 def main():
     parser = argparse.ArgumentParser(description="通用客服平台本地管理")
-    parser.add_argument("command", choices=["create-admin"])
-    parser.parse_args()
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("create-admin")
+    rotation = commands.add_parser("rotate-keys", help="租户范围主密钥预览、检查、原子执行或恢复")
+    rotation.add_argument("mode", choices=["preview", "check", "execute", "recover"])
+    rotation.add_argument("--tenant", type=UUID, required=True)
+    rotation.add_argument(
+        "--target", required=True, help="非敏感密钥版本标识，密钥只从受保护配置读取"
+    )
+    rotation.add_argument("--confirm", help="预览返回的完整摘要")
+    retention = commands.add_parser("retention", help="默认仅预览；不删除活动请求或当前配额窗口")
+    retention.add_argument("mode", choices=["preview", "execute"])
+    retention.add_argument("--tenant", type=UUID, required=True)
+    retention.add_argument("--confirm")
+    retention.add_argument("--batch-size", type=int, default=20)
+    retention.add_argument("--documents", action="store_true", help="仅清理既有 deleting 文档")
+    for field in ("conversations", "visitors", "calls", "audit"):
+        retention.add_argument("--" + field + "-days", type=int)
+    args = parser.parse_args()
+    if args.command != "create-admin":
+        return maintenance(args, parser)
     try:
         data = UserCreate(
             login=input("登录标识（小写）："),
@@ -57,6 +76,79 @@ def main():
         print("平台管理员已创建。密码不会显示或写入文件。")
     except (SQLAlchemyError, RuntimeError):
         parser.exit(1, "初始化失败：请检查独立数据库连接、迁移和用户唯一性。\n")
+    finally:
+        engine.dispose()
+
+
+def maintenance(args, parser):
+    import json
+
+    from support_agent.credentials import Keyring
+    from support_agent.errors import AppError
+    from support_agent.maintenance import audit, rotate_credentials, rotation_plan
+    from support_agent.retention import apply_retention, retention_plan
+    from support_agent.storage import LocalDocumentStorage
+
+    settings = Settings()
+    engine, sessions = build_database(settings)
+    try:
+        check_database(engine)
+        with sessions() as db:
+            if args.mode in {"execute", "recover"} and not args.confirm:
+                parser.exit(1, "执行需要先预览，并提供 --confirm 完整摘要。\n")
+            try:
+                if args.command == "rotate-keys":
+                    ring = Keyring(settings)
+                    if args.mode in {"preview", "check"}:
+                        result = rotation_plan(
+                            db, args.tenant, ring, args.target, check=args.mode == "check"
+                        )
+                    else:
+                        result = rotate_credentials(
+                            db, args.tenant, ring, args.target, args.confirm
+                        )
+                else:
+                    policy = SimpleNamespace(
+                        batch_size=args.batch_size,
+                        documents=args.documents,
+                        **{
+                            field + "_days": getattr(args, field + "_days")
+                            if getattr(args, field + "_days") is not None
+                            else getattr(settings, "retention_" + field + "_days")
+                            for field in ("conversations", "visitors", "calls", "audit")
+                        },
+                    )
+                    result = (
+                        retention_plan(db, args.tenant, policy)
+                        if args.mode == "preview"
+                        else apply_retention(
+                            db,
+                            args.tenant,
+                            policy,
+                            args.confirm,
+                            LocalDocumentStorage(settings.document_storage_root),
+                        )
+                    )
+            except (AppError, SQLAlchemyError, ValueError, RuntimeError, OSError):
+                db.rollback()
+                if args.mode in {"execute", "recover"}:
+                    # A lost commit acknowledgement is unknown, never recorded as a definite rollback.
+                    audit(
+                        db,
+                        args.tenant,
+                        "maintenance.interrupted",
+                        {"command": args.command},
+                        outcome="failure",
+                        reason="result_unknown_check_state",
+                    )
+                    db.commit()
+                raise
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    except (AppError, SQLAlchemyError, ValueError, RuntimeError, OSError):
+        parser.exit(
+            1,
+            "维护未完成或提交结果未知。未输出密钥；保持入口关闭，检查状态并重新预览，勿盲目执行。\n",
+        )
     finally:
         engine.dispose()
 

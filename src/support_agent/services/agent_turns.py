@@ -24,6 +24,7 @@ from support_agent.schemas import RuntimeConfig
 from support_agent.services import chat, limits, model_runtime, tool_execution, workspace
 from support_agent.services.audit import record
 from support_agent.services.resources import get_owned
+from support_agent.stream_events import notify
 from support_agent.tool_protocol import AgentTurnOut, ExecutionOut, ToolResult
 
 SYSTEM = """You are a customer support assistant. Use only supplied tools when useful; otherwise answer normally.
@@ -324,6 +325,7 @@ def prompt(db, context, call, data, request):
     evidence = []
     if selected:
         call.phase = "retrieving"
+        notify(request, "retrieving")
         evidence = request.app.state.retriever.search(db, context, selected, data.content)
         if (
             not evidence

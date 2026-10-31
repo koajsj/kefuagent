@@ -1,5 +1,6 @@
 """Sixteen non-industry scenarios. Oracle responses test mechanics, never real-model quality."""
 
+import hashlib
 import json
 import os
 import time
@@ -9,6 +10,7 @@ from uuid import uuid4
 from phase2_support import config, kb, private_settings, upload  # noqa: F401
 from sqlalchemy import text
 
+from support_agent.evaluation import ranking_metrics, summarize
 from support_agent.providers import Completion, ModelToolCall, ProviderFailure
 from support_agent.tool_runtime import TEXT_OUTPUT, TEXT_PARAMETERS
 
@@ -35,6 +37,13 @@ def test_offline_customer_quality_set(platform):
         "mode": "offline_mock",
         "real_model_verified": False,
         "answer_quality": "not_evaluated",
+        "dataset_version": dataset["version"],
+        "dataset_sha256": hashlib.sha256(
+            (Path(__file__).parent / "fixtures/customer_quality.json").read_bytes()
+        ).hexdigest(),
+        "config_version": "offline-oracle-v2",
+        "prompt_version": "extract-only-v1",
+        "retrieval_version": type(app.state.retriever).__name__,
         "cases": [],
     }
     for case in dataset["cases"]:
@@ -52,6 +61,20 @@ def test_offline_customer_quality_set(platform):
         search = c.post(
             f"/api/v1/knowledge-bases/{kid}/search", headers=a, json={"query": case["question"]}
         ).json()
+        ranked = [str(ids.index(hit["document_id"])) for hit in search]
+        retrieval = ranking_metrics(ranked, case["relevance"], k=6)
+        if case["kind"] == "retrieval":
+            assert retrieval["recall_at_k"] == 1, case["id"]
+            report["cases"].append(
+                {
+                    "id": case["id"],
+                    "kind": case["kind"],
+                    "retrieval": retrieval,
+                    "ranked_documents": ranked,
+                    "semantic_correctness": "manual_required",
+                }
+            )
+            continue
         with app.state.sessions() as db:
             db.execute(
                 text("SELECT set_config('app.tenant_id',:id,true)"), {"id": tenants[0]["id"]}
@@ -165,6 +188,31 @@ def test_offline_customer_quality_set(platform):
             {
                 "id": case["id"],
                 "kind": case["kind"],
+                "status": value.get("status"),
+                "retrieval": retrieval,
+                "ranked_documents": ranked,
+                "source_valid": all(
+                    item["document_id"] in ids
+                    and any(item["chunk_id"] == h["chunk_id"] for h in search)
+                    for item in value.get("citations", [])
+                )
+                if value.get("citations")
+                else None,
+                "quote_matches": all(
+                    any(item["quote"] in doc for doc in case.get("documents", []))
+                    for item in value.get("citations", [])
+                )
+                if value.get("citations")
+                else None,
+                "correct_refusal": value.get("status") == "unresolved"
+                if case["kind"] in {"unknown", "conflict", "removed", "injection"}
+                else None,
+                "tool_success": all(e["status"] == "succeeded" for e in value.get("executions", []))
+                if case["kind"] == "tool"
+                else None,
+                "unauthorized_denied": value["executions"][0]["status"] == "denied"
+                if case["kind"] == "unauthorized"
+                else None,
                 "mechanical_checks": "passed",
                 "provider": "offline-mock",
                 "models": [s["model"] for s in call.get("steps", [])],
@@ -180,7 +228,18 @@ def test_offline_customer_quality_set(platform):
                 "real_answer_correctness": "not_evaluated",
             }
         )
+    report["metrics"] = summarize(report["cases"])
     target = os.environ.get("P4_EVAL_REPORT")
     if target:
         with open(target, "x") as handle:
             json.dump(report, handle, ensure_ascii=False, indent=2)
+
+
+def test_rank_metrics_use_relevance_and_do_not_claim_semantic_accuracy():
+    from support_agent.evaluation import ranking_metrics
+
+    result = ranking_metrics(["noise", "a", "a", "b"], {"a": 2, "b": 1}, k=3)
+    assert result["recall_at_k"] == 1
+    assert result["mrr"] == 0.5
+    assert 0 < result["ndcg_at_k"] < 1
+    assert ranking_metrics([], {}, k=3)["recall_at_k"] is None

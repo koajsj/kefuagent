@@ -35,6 +35,12 @@ class Settings(BaseSettings):
         return value.rstrip("/")
 
     credential_master_key: SecretStr | None = None
+    credential_keyring: SecretStr | None = None
+    credential_active_key: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,32}$")
+    retention_conversations_days: int | None = Field(default=None, ge=2, le=36500)
+    retention_visitors_days: int | None = Field(default=None, ge=2, le=36500)
+    retention_calls_days: int | None = Field(default=None, ge=2, le=36500)
+    retention_audit_days: int | None = Field(default=None, ge=30, le=36500)
     document_storage_root: Path = Path(".local/documents")
     model_allowed_hosts: list[str] = Field(default_factory=list)
     tenant_requests_per_minute: int = Field(default=120, ge=1, le=10000)
