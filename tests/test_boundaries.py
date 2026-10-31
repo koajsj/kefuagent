@@ -26,6 +26,7 @@ def platform():
     from support_agent.config import Settings
     from support_agent.main import create_app
     from support_agent.models import User
+    from support_agent.schemas import UserOut
     from support_agent.security import hash_password
 
     url = os.environ.get("TEST_DATABASE_URL")
@@ -39,11 +40,12 @@ def platform():
     app = create_app(settings)
     suffix = uuid4().hex
     password = "Acceptance-only-" + uuid4().hex
+    encoded = hash_password(password)
     with app.state.sessions.begin() as db:
         root = User(
             login=f"root-{suffix}",
             display_name="Acceptance root",
-            password_hash=hash_password(password),
+            password_hash=encoded,
             is_platform_admin=True,
         )
         db.add(root)
@@ -55,13 +57,29 @@ def platform():
         root_headers = {"Authorization": "Bearer " + token.json()["access_token"]}
         users = []
         for label in ["a", "b", "member", "second"]:
-            resp = client.post(
-                "/api/v1/users",
-                headers=root_headers,
-                json={"login": f"{label}-{suffix}", "display_name": label, "password": password},
-            )
-            assert resp.status_code == 201, resp.text
-            users.append(resp.json())
+            if label == "a":
+                # Keep a real API creation and password hash in every fixture.
+                resp = client.post(
+                    "/api/v1/users",
+                    headers=root_headers,
+                    json={
+                        "login": f"{label}-{suffix}",
+                        "display_name": label,
+                        "password": password,
+                    },
+                )
+                assert resp.status_code == 201, resp.text
+                users.append(resp.json())
+            else:
+                # The other identities are setup data, not repeated user-creation checks.
+                # Reuse this fixture's real hash; authentication still verifies Argon2 normally.
+                with app.state.sessions.begin() as db:
+                    user = User(
+                        login=f"{label}-{suffix}", display_name=label, password_hash=encoded
+                    )
+                    db.add(user)
+                    db.flush()
+                    users.append(UserOut.model_validate(user).model_dump(mode="json"))
         tenants, headers = [], []
         for label, user in zip(["a", "b"], users[:2], strict=True):
             resp = client.post(
