@@ -42,7 +42,6 @@ def main():
         ],
         env=os.environ | {"P4_EVAL_REPORT": str(report.resolve())},
         check=False,
-        timeout=30,
     )
     if result.returncode:
         raise SystemExit(result.returncode)

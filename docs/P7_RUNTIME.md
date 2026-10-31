@@ -76,4 +76,4 @@ uv run python -m support_agent.cli retention execute --tenant TENANT_UUID --conv
 
 `.github/workflows/ci.yml` 在 main push、PR 或手动触发。固定 Actions 提交，contents:read，不保留 Git 凭证；全新 PostgreSQL17 service、非超级/非 BYPASSRLS 应用角色，执行现有迁移链（当前 0001–0009）再复用 scripts/check.py。没有个人路径、真实 Key 或外部模型；服务和模拟密码仅用于短暂 CI。
 
-P9 当前 CI：uv 锁定依赖，Python3.13、Ruff/格式、不同目标库的 schema diff、28 项 Python 原子回归只执行一次；静态/schema 各 30 秒上限，pytest 为 45 秒异常保护上限，并输出最慢 10 项及单项超过 20 秒时的线程堆栈。正常运行仍以本机约 21 秒为参考，45 秒不是性能目标。之后 wheel 打包、3 项 JS（3 秒上限）、JS 模块语法/链接、HTML 锚点及全部 Web 资源/许可证检查。工作流 3 分钟超时，不上传环境、日志或数据制品。Node 使用 runner 自带版本；无前端构建框架。历史 Actions 结果记录在 P7_ACCEPTANCE，本次修复尚未验证远端 CI，不以 YAML 存在代替运行通过。
+P9 当前 CI：uv 锁定依赖，Python3.13、Ruff/格式、不同目标库的 schema diff、28 项 Python 原子回归只执行一次，输出最慢 10 项。随后执行 wheel 打包、3 项 JS、JS 模块语法/链接、HTML 锚点及全部 Web 资源/许可证检查。检查脚本及离线检索评测不设置子进程硬超时，按实际退出码判断结果；工作流整体 3 分钟安全限制与 PostgreSQL 健康检查仍保留，不上传环境、日志或数据制品。Node 使用 runner 自带版本；无前端构建框架。历史 Actions 结果记录在 P7_ACCEPTANCE，本次修改未验证远端 CI，不以 YAML 存在代替运行通过。应用的 Provider、工具、解析、数据库及 Agent/SSE 运行时超时不受此调整影响。

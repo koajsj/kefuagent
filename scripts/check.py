@@ -1,4 +1,4 @@
-"""Run bounded checks against the separately migrated test DB; no reset or deletion."""
+"""Run checks against the separately migrated test DB; no reset or deletion."""
 
 import os
 import subprocess
@@ -25,9 +25,9 @@ def main():
     if "test" not in make_url(test_settings.database_url.get_secret_value()).database:
         raise SystemExit("Refusing a database whose name does not contain test")
     checks = [
-        ([sys.executable, "-m", "ruff", "check", "."], None, 30),
-        ([sys.executable, "-m", "ruff", "format", "--check", "."], None, 30),
-        ([sys.executable, "-m", "alembic", "check"], None, 30),
+        ([sys.executable, "-m", "ruff", "check", "."], None),
+        ([sys.executable, "-m", "ruff", "format", "--check", "."], None),
+        ([sys.executable, "-m", "alembic", "check"], None),
     ]
     migration_url = settings.migration_database_url or settings.database_url
     if make_url(migration_url.get_secret_value()) != make_url(os.environ["TEST_DATABASE_URL"]):
@@ -39,19 +39,11 @@ def main():
                     "DATABASE_URL": os.environ["TEST_DATABASE_URL"],
                     "MIGRATION_DATABASE_URL": os.environ["TEST_DATABASE_URL"],
                 },
-                30,
             )
         )
-    # Hosted runners vary; keep the suite bounded without using the local timing as a cap.
-    checks.append(
-        (
-            [sys.executable, "-m", "pytest", "--durations=10", "-o", "faulthandler_timeout=20"],
-            None,
-            45,
-        )
-    )
-    for command, env, timeout in checks:
-        result = subprocess.run(command, env=env, timeout=timeout)
+    checks.append(([sys.executable, "-m", "pytest", "--durations=10"], None))
+    for command, env in checks:
+        result = subprocess.run(command, env=env)
         if result.returncode:
             raise SystemExit(result.returncode)
 

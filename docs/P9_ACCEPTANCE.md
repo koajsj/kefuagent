@@ -89,3 +89,11 @@ Terra 只读审查给出一项候选：夹具直接创建独立 AuthSession，�
 修复后仅进行一次完整确认：`scripts/check.py` 通过（Ruff、103 文件格式、隔离库 Alembic 无差异、28 项 pytest），pytest 21.47 秒，脚本总耗时 23.79 秒；最慢仍为工具超时/审计 call 1.48 秒。诊断 21.34 秒 → 最终 21.47 秒，属于正常波动，本次没有宣称测试性能提升。3 项 JavaScript 仅运行一次，90.10 ms 全部通过；`git diff --check`、命令构造原子核对通过（pytest 仅调用一次且独享 45 秒，静态/schema 各 30 秒）。测试/断言/fixture、生产源码、锁文件、迁移与工作流文件逐项确认无改动，仍为 28 Python / 3 JS，无过滤或跳过。
 
 仅提交 `scripts/check.py`、README、本运行文档及 P9 记录的实际改动，正常推送 main 后核对 SHA；最终 SHA 见交付消息。远端 CI：NOT_RUN；不查询/监控 Actions，不能宣布 CI 通过。没有真实模型调用或部署。
+
+## 移除检查执行器超时（2026-10-31，当前策略）
+
+工作区开始时干净，本地 `b56beaf` 落后于远端；一次 fetch 核实 main 为用户指定的 `e5259485b392ee9a3f5cb93ad7ddf1dc64daed65`，仅快进同步，保留其 README 与 CI 健康检查修复。Sol 与 Terra 只读清单交叉核对后，修改三个实际检查入口：`check.py` 移除 Ruff/格式/Alembic 30 秒及 pytest 45 秒子进程上限；`check_delivery.py` 删除 run_bounded/TimeoutExpired 分支及 Node 10 秒、模块链接 15 秒上限；`evaluate_quality.py` 移除检索 pytest 30 秒上限。均直接等待退出码，未增加包装器或依赖。移除仅用于打印堆栈的 faulthandler 显式配置（原本不终止测试），保留最慢 10 项报告。
+
+基础设施边界保留：CI Job 整体 3 分钟、`pg_isready -U postgres -d postgres`、容器健康检查 5 秒及重试；未改 workflow、Compose、数据库角色或权限。生产 Provider HTTP/子进程、工具、文档解析、数据库连接/语句、Agent/SSE 预算保持原文件不变。测试内部验证生产超时和并发同步的等待也保留。
+
+本轮仅执行一次现有 Python 检查：28 项通过，21.90 秒；含 Ruff、103 文件格式及隔离 P8 库 Alembic 无差异的整个脚本用时 24.49 秒。JS/交付仅执行一次：3 项通过，96.89 ms；模块链接、HTML 锚点、16 个 wheel 资源及 MIT 授权通过，整个交付脚本约 0.30 秒。脚本 AST 与执行入口检索确认无子进程 timeout 或 TimeoutExpired 包装；`git diff --check`、uv 离线锁校验及安装依赖兼容检查通过。测试/fixture/断言、生产源码、迁移、依赖、workflow/Compose 相对 e525948 均无改动，数量保持 28 Python / 3 JS。仅修改三个检查脚本及两份既有运行/验收文档；验收后已获用户授权正常提交并推送 main，最终 SHA 及远端核对见交付消息。远端 CI/GUI/真实模型/生产环境 NOT_RUN。
