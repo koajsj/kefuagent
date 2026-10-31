@@ -23,6 +23,8 @@ uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8
 
 开发模式下可按提示创建私有文档目录，并输入 `NEW KEYS` 只为缺失项追加随机密钥。已有配置（包括空值）不会覆盖；已有加密凭证或备份必须恢复原主密钥，新密钥不能解密旧数据。使用外部环境注入且没有 `.env` 时，请通过原秘密管理渠道补齐密钥。配置模式不自动迁移、创建管理员或启用外部模型；生产配置应由部署管理员按[部署与恢复](DEPLOYMENT.md)处理。
 
+配置途中按 Ctrl+C 或输入结束会安全退出（130），已经写入的配置保留。重新运行 `setup --configure` 可继续补齐缺失项；若 `.env` 写入被系统故障中断而不完整，请先在本机私下修正连接配置，不要删除旧密钥或重新初始化集群。`INIT` 已创建集群但尚未完成数据库配置时，由本机数据库管理员检查角色和库并恢复连接，不能靠再次 `init` 覆盖。
+
 打开 <http://127.0.0.1:8000>，以刚创建的平台管理员登录，按[首次使用](FIRST_RUN.md)创建企业并体验离线演示。浏览器地址须与 `WEB_ORIGIN` 完全一致，勿混用 `localhost` 和 `127.0.0.1`。敏感信息不要发到聊天、日志或版本库。
 
 | 检查项 | 处理方向 |
@@ -34,4 +36,4 @@ uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8
 | 管理员 | 数据库就绪后交互执行 `create-admin`；已有停用管理员需走受信任的恢复流程。 |
 | Origin | `WEB_ORIGIN` 必须与实际访问地址一致；生产环境使用最终 HTTPS 地址。 |
 
-真实模型须由部署方另行配置并确认费用。生产配置、安全与恢复见[部署与恢复](DEPLOYMENT.md)、[运维与安全](OPERATIONS.md)和[生产检查清单](PRODUCTION_CHECKLIST.md)。本次新手流程的浏览器 GUI、macOS 全新安装、Linux、Docker、生产环境和真实模型尚未验收（NOT_RUN）；历史验证见各阶段记录。
+真实模型须由部署方另行配置并确认费用。生产配置、安全与恢复见[部署与恢复](DEPLOYMENT.md)、[运维与安全](OPERATIONS.md)和[生产检查清单](PRODUCTION_CHECKLIST.md)。P14 已在现有 macOS 的全新临时源码目录、独立虚拟环境和获授权临时空库复现安装与离线流程，见[首次使用记录](FIRST_RUN.md)。全新主机上的系统依赖安装、`INIT` 新集群分支、浏览器 GUI、Linux、Docker、生产环境和真实模型仍为 NOT_RUN。

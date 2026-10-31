@@ -118,6 +118,8 @@ flowchart TB
 
 登录后按[首次使用](docs/FIRST_RUN.md)创建企业并导入虚构 SaaS「青禾协作」的离线演示。演示不调用外部模型，不代表真实模型质量；公开入口需要另行发布，网站接入见[网站集成](docs/WEBSITE_INTEGRATION.md)。
 
+P14 已在现有 macOS 上用全新临时源码目录、独立虚拟环境和临时空库复现上述离线流程；这不等于全新主机、浏览器或生产部署验收，具体边界见首次使用记录。
+
 ### Production deployment
 
 生产部署须显式设置 `DEPLOYMENT_ENVIRONMENT=production`，启动前会强制执行生产预检。也可在不改变环境模式时执行 `uv run python -m support_agent.cli preflight --production` 做严格只读检查：错误返回退出码 1，警告和预检通过均不等于生产验收。HTTPS、入口保护、密钥、存储权限、数据库运行角色及管理员等要求见[生产部署检查清单](docs/PRODUCTION_CHECKLIST.md)；不要向 HTTP 进程注入迁移账户连接。

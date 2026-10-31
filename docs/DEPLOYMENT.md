@@ -24,7 +24,7 @@ CREATE ROLE support_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION 
 CREATE DATABASE support_agent OWNER support_owner;
 ```
 
-`.env` 中 DATABASE_URL 使用 support_app；MIGRATION_DATABASE_URL 使用 support_owner。数据库账号密码含特殊字符时必须 URL 编码，不把连接串写进聊天、日志或命令历史。
+运行 `.env` 中的 DATABASE_URL 使用 support_app，**不加入 MIGRATION_DATABASE_URL**。仅在单独的受保护迁移环境中设置 MIGRATION_DATABASE_URL（support_owner），供下方显式迁移命令读取；迁移后退出该环境，再以运行配置创建管理员和启动 HTTP 服务。数据库账号密码含特殊字符时必须 URL 编码，不把连接串写进聊天、日志或命令历史。
 
 首次生成主密钥和匿名限流密钥：在已经复制的 `.env` **尚无这两个变量时**执行以下一次性脚本。已有密钥时拒绝覆盖。两项密钥不会打印。
 

@@ -133,6 +133,11 @@ def setup(parser, *, configure=False):
             configure_local()
         settings = Settings()
         engine, _ = build_database(settings)
+    except (KeyboardInterrupt, EOFError):
+        parser.exit(
+            130,
+            "\n初始化已中断；已写入的配置保留，不自动回滚数据库或替换密钥。检查 .env 后可重新运行 setup --configure；若本机集群已创建，请使用 start 或按部署文档恢复，勿重新 init。\n",
+        )
     except SetupRefused as error:
         parser.exit(1, str(error) + "\n")
     except (ValidationError, OSError, ValueError, subprocess.CalledProcessError):

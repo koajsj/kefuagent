@@ -2,9 +2,14 @@
 (() => {
   const script = document.currentScript;
   const id = script?.dataset.agent;
-  if (!/^[0-9a-f-]{36}$/.test(id || "")) return;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id || "")) return;
   const origin = new URL(script.src).origin;
+  if ([...document.querySelectorAll("[data-support-widget-origin][data-support-widget-agent]")].some(
+    (element) => element.dataset.supportWidgetOrigin === origin && element.dataset.supportWidgetAgent === id
+  )) return;
   const host = document.createElement("aside");
+  host.dataset.supportWidgetOrigin = origin;
+  host.dataset.supportWidgetAgent = id;
   Object.assign(host.style, {
     position: "fixed",
     right: "20px",
@@ -47,5 +52,13 @@
     toggle.textContent = frame.hidden ? "在线客服" : "关闭客服";
   });
   host.append(frame, toggle);
-  document.body.append(host);
+  if (document.body) {
+    document.body.append(host);
+  } else {
+    // Reserve the instance before DOMContentLoaded so another script cannot duplicate it.
+    document.documentElement.append(host);
+    document.addEventListener("DOMContentLoaded", () => {
+      if (host.isConnected && document.body) document.body.append(host);
+    }, { once: true });
+  }
 })();
