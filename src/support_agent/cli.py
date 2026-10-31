@@ -19,6 +19,10 @@ from support_agent.security import hash_password
 def main():
     parser = argparse.ArgumentParser(description="通用客服平台本地管理")
     commands = parser.add_subparsers(dest="command", required=True)
+    setup = commands.add_parser("setup", help="复用预检引导首次安装；不自动迁移数据库")
+    setup.add_argument(
+        "--configure", action="store_true", help="交互创建缺失的本机配置、密钥或文档目录"
+    )
     commands.add_parser("create-admin")
     checks = commands.add_parser("preflight", help="只读检查部署配置和数据库")
     checks.add_argument("--production", action="store_true", help="应用严格生产要求；不会修改配置")
@@ -38,6 +42,10 @@ def main():
     for field in ("conversations", "visitors", "calls", "audit"):
         retention.add_argument("--" + field + "-days", type=int)
     args = parser.parse_args()
+    if args.command == "setup":
+        from support_agent.bootstrap import setup
+
+        return setup(parser, configure=args.configure)
     if args.command == "preflight":
         return preflight(parser, production=args.production)
     if args.command != "create-admin":

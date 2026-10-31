@@ -723,3 +723,8 @@ select {
 .operations { display: grid; gap: .75rem; margin-top: 1rem; }
 .collaboration-entry { border-bottom: 1px solid var(--border, #ddd); padding: .5rem 0; }
 .collaboration-entry p { white-space: pre-wrap; }
+
+.onboarding-steps { display: grid; gap: 12px; }
+.onboarding-step { display: flex; gap: 18px; margin-bottom: 0; }
+.onboarding-step h2 { margin-bottom: 6px; }
+.onboarding-number { color: var(--accent); font-size: 13px; font-weight: 600; }

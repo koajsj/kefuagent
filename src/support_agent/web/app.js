@@ -16,6 +16,7 @@ import {
 } from "./management.js";
 
 import { publicationsPage } from "./publications.js";
+import { onboardingPage } from "./onboarding.js";
 
 import { sessionState } from "./storage.js";
 
@@ -28,6 +29,7 @@ let user = null,
   epoch = 0,
   noticeTimer;
 const pages = {
+  onboarding: ["使用向导", onboardingPage],
   dashboard: ["工作区概览", dashboardPage],
   publications: ["公开客服入口", publicationsPage],
   chat: ["客服会话", chatPage],
@@ -76,7 +78,8 @@ function navigation() {
       role !== "admin"
     )
       continue;
-    if (!role && key !== "platform") continue;
+    if (key === "onboarding" && role !== "admin" && !user.is_platform_admin) continue;
+    if (!role && key !== "platform" && key !== "onboarding") continue;
     nav.append(el("a", { href: "#" + key, "data-page": key }, name));
   }
 }
@@ -84,12 +87,14 @@ async function chooseTenant(id) {
   client.setTenant(id);
   tenant = id;
   role = "";
+  document.querySelector("#mode-banner").textContent = id ? "正在验证企业权限…" : "请选择有成员权限的企业。";
   epoch++;
   view.replaceChildren(el("p", { class: "loading" }, "正在验证企业权限…"));
   if (id) {
     try {
       const info = await client.request("/workspace");
       role = info.role;
+      sessionState.set("support.tenant." + user.id, id);
       document.querySelector("#mode-banner").textContent =
         info.external_models_enabled
           ? "外部模型开关已开启；本次未做真实模型质量验收。真实调用可能计费。"
@@ -98,10 +103,13 @@ async function chooseTenant(id) {
       if (!user) return;
       if (error.name === "StaleResponse") return;
       if (error.status !== 403) throw error;
+      document.querySelector("#mode-banner").textContent =
+        "当前账号不是此企业的有效成员；请在左侧选择已有成员权限的企业。平台身份不会绕过授权。";
     }
   }
   navigation();
-  if (!role && user?.is_platform_admin) location.hash = "platform";
+  if (role && role !== "admin" && !user.is_platform_admin && location.hash === "#onboarding") location.hash = "chat";
+  if (!role && user?.is_platform_admin && !["#platform", "#onboarding"].includes(location.hash)) location.hash = "onboarding";
   else if (
     !pages[location.hash.slice(1)] ||
     (location.hash === "#platform" && !user?.is_platform_admin)
@@ -109,7 +117,7 @@ async function chooseTenant(id) {
     location.hash = "chat";
   await render();
 }
-async function signedIn() {
+async function signedIn(preferredTenant = tenant) {
   user = await client.request("/auth/me");
   tenants = await collection(client.request.bind(client), "/tenants");
   document.querySelector("#login").hidden = true;
@@ -127,9 +135,12 @@ async function signedIn() {
       ),
     ),
   );
-  const active = tenants.find((t) => t.status === "active");
-  switcher.value = active?.id || "";
-  await chooseTenant(switcher.value);
+  const candidates = tenants.filter((t) => t.status === "active");
+  const remembered = preferredTenant || sessionState.get("support.tenant." + user.id);
+  const selected = (candidates.find((t) => t.id === remembered) || candidates[0])?.id || "";
+  switcher.value = selected;
+  if (!location.hash && (user.is_platform_admin || selected)) location.hash = "onboarding";
+  await chooseTenant(selected);
 }
 async function render() {
   if (!user) return;
@@ -144,7 +155,7 @@ async function render() {
     view.replaceChildren(message("当前账号没有平台管理权限。", "error"));
     return;
   }
-  if (key !== "platform" && !role) {
+  if (key !== "platform" && !(key === "onboarding" && user.is_platform_admin) && !role) {
     view.replaceChildren(
       heading("选择工作企业", "企业业务需要有效成员身份。"),
       message(
@@ -153,6 +164,10 @@ async function render() {
           : "当前账号暂无有效企业成员关系，请联系管理员。",
       ),
     );
+    return;
+  }
+  if (key === "onboarding" && role !== "admin" && !user.is_platform_admin) {
+    view.replaceChildren(message("使用向导需要企业管理员权限。", "error"));
     return;
   }
   if (
@@ -182,8 +197,8 @@ async function render() {
     navigate: (next) => {
       if (current === epoch) location.hash = next;
     },
-    refreshTenants: async () => {
-      if (current === epoch) await signedIn();
+    refreshTenants: async (preferred) => {
+      if (current === epoch) await signedIn(preferred ?? tenant);
     },
   };
   try {

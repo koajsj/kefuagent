@@ -38,9 +38,10 @@ const guard = async (ctx, fn) => {
 };
 
 export async function agentsPage(ctx) {
-  const [agents, bases] = await Promise.all([
+  const [agents, bases, setup] = await Promise.all([
     list(ctx, "/agent-configs"),
     list(ctx, "/knowledge-bases"),
+    admin(ctx) ? ctx.api("/setup-status") : null,
   ]);
   const root = el("div"),
     editor = el("div");
@@ -54,6 +55,9 @@ export async function agentsPage(ctx) {
       [
         { id: "demo", name: "离线演示（确定性响应，无模型费用）" },
         { id: "openai_compatible", name: "OpenAI 兼容服务" },
+        ...(agent?.provider && !["demo", "openai_compatible"].includes(agent.provider)
+          ? [{ id: agent.provider, name: agent.provider + "（当前不支持调用）" }]
+          : []),
       ],
       agent?.provider || "demo",
     );
@@ -64,34 +68,41 @@ export async function agentsPage(ctx) {
         ...check(b.name, binding?.knowledge_base_ids.includes(b.id)),
       }));
     const runtime = agent?.runtime || {};
-    const supports = check("支持 Tool Calling", runtime.supports_tools ?? true),
+    const supports = check("模型支持 Tool Calling（需自行确认）", runtime.supports_tools ?? false),
       temperature = check("发送温度参数", runtime.send_temperature ?? true);
+    const model = input("model", agent?.model || "offline-support", {
+      required: true, maxLength: 120,
+    });
+    const baseUrl = input("base_url", agent?.base_url || "", { type: "url" });
+    const credentialRef = input("credential_ref", agent?.credential_ref || "", {
+      placeholder: "cred_primary",
+    });
+    const providerFields = el("div", {},
+      label("Base URL（须使用部署方批准的 HTTPS 主机）", baseUrl),
+      label("凭证引用（先在模型凭证页面创建）", credentialRef),
+    );
+    function updateProvider() {
+      const external = provider.value === "openai_compatible";
+      providerFields.hidden = provider.value === "demo";
+      baseUrl.disabled = provider.value === "demo";
+      credentialRef.disabled = provider.value === "demo";
+      baseUrl.required = external;
+      credentialRef.required = external;
+      if (!agent) {
+        if (external && model.value === "offline-support") model.value = "";
+        if (!external && !model.value) model.value = "offline-support";
+      }
+    }
+    provider.addEventListener("change", updateProvider);
+    updateProvider();
     const fields = [
       label(
         "Agent 名称",
         input("name", agent?.name || "", { required: true, maxLength: 120 }),
       ),
       label("Provider", provider),
-      label(
-        "Model ID",
-        input("model", agent?.model || "offline-support", {
-          required: true,
-          maxLength: 120,
-        }),
-      ),
-      label(
-        "Base URL（兼容服务必填，须在部署白名单中）",
-        input("base_url", agent?.base_url || "", {
-          type: "url",
-          placeholder: "https://api.example.com/v1",
-        }),
-      ),
-      label(
-        "凭证引用（在模型凭证中创建）",
-        input("credential_ref", agent?.credential_ref || "", {
-          placeholder: "cred_primary",
-        }),
-      ),
+      label("Model ID（兼容服务请填写供应商提供的模型标识）", model),
+      providerFields,
       label(
         "Agent 说明",
         textArea("description", agent?.behavior.description || "", {
@@ -110,6 +121,8 @@ export async function agentsPage(ctx) {
         "语言",
         input("language", agent?.behavior.language || "zh", { required: true }),
       ),
+      el("details", {}, el("summary", {}, "高级运行与路由设置"),
+        el("p", { class: "note" }, "参数与工具能力取决于所选模型，请按供应商文档确认。"),
       el(
         "div",
         { class: "form-row" },
@@ -165,9 +178,9 @@ export async function agentsPage(ctx) {
         ),
       ),
       el(
-        "details",
+        "div",
         {},
-        el("summary", {}, "任务路由与备用模型（JSON）"),
+        el("h3", {}, "任务路由与备用模型（JSON）"),
         el(
           "p",
           { class: "note" },
@@ -176,6 +189,7 @@ export async function agentsPage(ctx) {
         textArea("routing", JSON.stringify(runtime.routing || {}, null, 2), {
           rows: 8,
         }),
+      ),
       ),
       enabled.node,
       el(
@@ -194,8 +208,8 @@ export async function agentsPage(ctx) {
           name: values.get("name"),
           provider: values.get("provider"),
           model: values.get("model"),
-          base_url: values.get("base_url") || null,
-          credential_ref: values.get("credential_ref") || null,
+          base_url: values.get("provider") === "demo" ? null : values.get("base_url") || null,
+          credential_ref: values.get("provider") === "demo" ? null : values.get("credential_ref") || null,
           enabled: enabled.box.checked,
           behavior: {
             description: values.get("description"),
@@ -275,6 +289,10 @@ export async function agentsPage(ctx) {
           ]),
         )
       : empty("还没有 Agent。企业管理员可创建离线演示或兼容模型配置。"),
+    setup ? message(
+      `服务器状态：外部模型${setup.external_models_enabled ? "已开启" : "已关闭"}；凭证加密${setup.credential_encryption_ready ? "已就绪" : "未就绪"}；批准主机：${setup.model_allowed_hosts.join("、") || "无"}。真实模型连接尚未验证。`,
+      "warning",
+    ) : null,
     editor,
   );
   return root;
@@ -344,7 +362,7 @@ export async function credentialsPage(ctx) {
     message(
       setup.credential_encryption_ready
         ? "主密钥配置有效。界面不会读取或显示 API Key。"
-        : "尚未配置有效的 CREDENTIAL_MASTER_KEY，凭证保存会安全失败。",
+        : "凭证加密尚未就绪，请联系部署管理员配置有效的密钥后再保存。",
       "warning",
     ),
     message(
@@ -352,6 +370,9 @@ export async function credentialsPage(ctx) {
         (setup.model_allowed_hosts.join("、") ||
           "无。请由部署管理员设置 MODEL_ALLOWED_HOSTS。"),
     ),
+    message(setup.external_models_enabled
+      ? "外部模型调用已开启；请确认主机白名单与供应商配置，连接尚未验证。"
+      : "外部模型调用已关闭；请联系部署管理员确认授权并配置服务。离线演示仍可使用。", "warning"),
     credentials.length
       ? table(
           ["引用", "状态", "更新时间", "操作"],

@@ -17,6 +17,15 @@ class WorkspaceOut(Output):
     external_models_enabled: bool
 
 
+class DemoImportOut(Output):
+    knowledge_base_id: UUID
+    document_id: UUID
+    agent_config_id: UUID
+    document_status: str
+    created: bool
+    offline: bool
+
+
 class KnowledgeBindingsOut(Output):
     knowledge_base_ids: list[UUID]
     config_version: int

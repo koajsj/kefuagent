@@ -45,8 +45,10 @@
           <summary>首次使用</summary>
           <p>
             在项目目录运行
-            <code>python -m support_agent.cli create-admin</code>
-            交互创建管理员。没有默认账号或密码。平台管理员登录后可创建企业及企业成员。
+            <code>uv run python -m support_agent.cli setup</code>
+            检查配置并获取恢复指引。全新安装可加 <code>--configure</code> 交互配置；
+            数据库就绪后由部署管理员运行 <code>create-admin</code> 创建首个账号。
+            没有默认账号或密码；登录后打开“使用向导”。
           </p>
         </details>
       </section>

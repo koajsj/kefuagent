@@ -24,7 +24,7 @@
   <a href="#-documentation">Documentation</a>
 </p>
 
-<sub>v0.7.1 · P12 · Modular Monolith</sub>
+<sub>v0.7.1 · Modular Monolith</sub>
 
 </div>
 
@@ -114,52 +114,9 @@ flowchart TB
 
 ## ⚡ Quick Start
 
-### Requirements
+全新 macOS 开发环境可按照[本机快速开始](docs/QUICK_START.md)使用 `setup --configure` 交互配置，明确执行迁移和创建管理员后启动；`setup` 默认只读检查。已有数据库、Linux 或生产环境请先阅读[部署与恢复](docs/DEPLOYMENT.md)。
 
-- Python **3.11–3.14**
-- PostgreSQL **15+**
-- [uv](https://docs.astral.sh/uv/)
-- macOS 本机脚本默认使用 Homebrew PostgreSQL 17
-
-### Fresh local setup · macOS
-
-```bash
-git clone https://github.com/koajsj/kefuagent.git
-cd kefuagent
-
-uv sync --locked
-
-# 仅限全新安装：创建本项目独立 PostgreSQL dev 库并生成私有 .env
-./scripts/local-postgres.sh init
-
-# 显式执行数据库迁移
-uv run alembic upgrade head
-
-# 首次交互创建平台管理员；不会生成默认账号
-uv run python -m support_agent.cli create-admin
-
-# 启动服务
-uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8000 --no-access-log --no-proxy-headers
-```
-
-打开：
-
-- [管理工作台](http://127.0.0.1:8000)
-- [Swagger API](http://127.0.0.1:8000/docs)
-- [ReDoc](http://127.0.0.1:8000/redoc)
-- [Health](http://127.0.0.1:8000/api/v1/health)
-
-**已有安装注意：** `init` 只用于全新本机环境；检测到已有 `.env` 或 `.local/pgdata` 时会拒绝执行，不要通过删除数据目录解决启动问题。已初始化但停止的本机集群使用 `./scripts/local-postgres.sh start`。外部 PostgreSQL、Linux、HTTPS、密钥和权限配置请先阅读[部署与恢复文档](docs/DEPLOYMENT.md)。
-
-### First-use workflow
-
-1. 创建企业及企业管理员。
-2. 配置兼容模型凭证，或先选择离线演示 Agent。
-3. 创建知识库并导入资料。
-4. 创建 Agent，授权知识库和只读工具。
-5. 创建客服入口，体验访客对话、人工接管和运营分析。
-
-离线演示用于验证产品流程，不代表真实模型回答质量。公开访客会话还需要单独配置随机的 `PUBLIC_RATE_KEY`；第三方模型默认关闭，需由部署方明确配置主机白名单、预算和调用开关。
+登录后按[首次使用](docs/FIRST_RUN.md)创建企业并导入虚构 SaaS「青禾协作」的离线演示。演示不调用外部模型，不代表真实模型质量；公开入口需要另行发布，网站接入见[网站集成](docs/WEBSITE_INTEGRATION.md)。
 
 ### Production deployment
 
@@ -197,6 +154,9 @@ uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8
 
 | Document | Description |
 | --- | --- |
+| [Quick Start](docs/QUICK_START.md) | 全新本机开发环境启动 |
+| [First Run](docs/FIRST_RUN.md) | 企业、离线演示和首次使用 |
+| [Website Integration](docs/WEBSITE_INTEGRATION.md) | 公开链接和网站嵌入 |
 | [Architecture](docs/ARCHITECTURE.md) | 架构、模块职责与设计决策 |
 | [Deployment & Recovery](docs/DEPLOYMENT.md) | 本机 / Linux 部署、升级、备份与恢复 |
 | [Production Checklist](docs/PRODUCTION_CHECKLIST.md) | 生产预检、配置与上线验收边界 |

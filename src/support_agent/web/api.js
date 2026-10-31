@@ -10,6 +10,13 @@ const errors = {
   visitor_limit_exceeded: "访客访问达到限制，请稍后再试。",
   public_tool_denied: "此工具未获公开使用授权。",
   publication_revoked: "入口已撤销，请创建新入口。",
+  visitor_access_revoked: "公开访问授权已失效，请联系管理员检查并重新发布。",
+  demo_modified: "演示资源已被修改或删除，系统不会覆盖现有数据；请检查现有资源。",
+  agent_disabled: "关联 Agent 已停用，请先启用再发布。",
+  model_configuration_unavailable: "模型配置不可用：请启用 Agent，并填写兼容服务地址与凭证引用。",
+  credential_ref_immutable: "凭证引用不可改名，请创建新的凭证引用。",
+  provider_unavailable: "模型服务暂不可用，请检查服务配置并稍后重试。",
+  provider_busy: "模型服务繁忙，请稍后重试。",
   conversation_closed: "会话已结束，请重新开始。",
   base_url_not_allowed:
     "模型地址未被部署方批准。请检查 HTTPS 地址和主机白名单。",

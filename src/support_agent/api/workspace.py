@@ -10,6 +10,7 @@ from support_agent.rag_schemas import KnowledgeBindings
 from support_agent.services import workspace
 from support_agent.services.resources import get_owned
 from support_agent.workspace_schemas import (
+    DemoImportOut,
     KnowledgeBindingsOut,
     ReadinessOut,
     StatisticsOut,
@@ -17,6 +18,13 @@ from support_agent.workspace_schemas import (
 )
 
 router = APIRouter(tags=["Workspace"])
+
+
+@router.post("/workspace/demo", response_model=DemoImportOut)
+def import_demo(request: Request, db: Database, context: TenantAdmin):
+    from support_agent.services.onboarding import import_demo
+
+    return import_demo(db, context, request)
 
 
 @router.get("/workspace", response_model=WorkspaceOut)
