@@ -1,6 +1,6 @@
 [project]
 name = "support-agent-platform"
-version = "0.7.0"
+version = "0.7.1"
 description = "Multi-tenant customer support RAG and bounded, authorized tool execution workspace"
 readme = "README.md"
 license = "MIT"

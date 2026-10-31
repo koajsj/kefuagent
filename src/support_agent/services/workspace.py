@@ -1,6 +1,6 @@
 """Workspace configuration and Agent knowledge access, reusing tenant authorization."""
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from support_agent.credentials import Keyring, cipher
 from support_agent.errors import AppError
@@ -72,28 +72,31 @@ def readiness(db, context, request):
         key_ready = True
     except AppError:
         key_ready = False
-    credentials = db.scalars(
-        select(ModelCredential).where(ModelCredential.tenant_id == context.tenant_id)
-    ).all()
-    configs = db.scalars(
-        select(AgentConfig).where(AgentConfig.tenant_id == context.tenant_id)
-    ).all()
+    enabled_credentials = db.scalar(
+        select(func.count())
+        .select_from(ModelCredential)
+        .where(ModelCredential.tenant_id == context.tenant_id, ModelCredential.enabled.is_(True))
+    )
+    enabled_agents, demo_agents = db.execute(
+        select(
+            func.count().filter(AgentConfig.enabled.is_(True)),
+            func.count().filter(AgentConfig.enabled.is_(True) & (AgentConfig.provider == "demo")),
+        ).where(AgentConfig.tenant_id == context.tenant_id)
+    ).one()
     return {
         "external_models_enabled": settings.allow_external_models,
         "credential_encryption_ready": key_ready,
         "public_rate_key_ready": settings.public_rate_key is not None,
         "model_allowed_hosts": settings.model_allowed_hosts,
-        "enabled_credentials": sum(c.enabled for c in credentials),
-        "enabled_agents": sum(c.enabled for c in configs),
-        "demo_agents": sum(c.enabled and c.provider == "demo" for c in configs),
+        "enabled_credentials": enabled_credentials,
+        "enabled_agents": enabled_agents,
+        "demo_agents": demo_agents,
         "web_origin": settings.web_origin,
         "real_model_verified": False,
     }
 
 
 def statistics(db, context):
-    from sqlalchemy import func
-
     from support_agent.models import Conversation, Document, ModelCall, ToolExecution
 
     def count(model):

@@ -10,7 +10,7 @@ import {
   actions,
   date,
 } from "./ui.js";
-import { requestIdentity, explain } from "./api.js";
+import { requestIdentity, explain, StaleResponse } from "./api.js";
 const root = document.querySelector("#public-app"),
   pid = location.pathname.split("/").pop();
 let info,
@@ -18,7 +18,8 @@ let info,
   busy = false,
   pending,
   offset = 0,
-  poll;
+  historyEpoch = 0,
+  runtimeEpoch = 0;
 const key = "support.visitor." + pid;
 const feedback = el("div"),
   ratingArea = el("section", {class:"public-rating"}),
@@ -39,28 +40,46 @@ const send = el("button", { type: "submit", class: "primary" }, "发送"),
     loadHistory(offset + 50).catch(showError),
   );
 async function api(path = "", options = {}) {
-  const response = await fetch("/api/v1/public/" + pid + path, {
-    method: options.method || "GET",
-    credentials: "omit",
-    cache: "no-store",
-    headers: {
-      ...(session ? { Authorization: "Visitor " + session.token } : {}),
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
-  if (response.ok && options.onEvent) return readEvents(response, options.onEvent);
-  const result = response.status === 204 ? null : await response.json();
-  if (!response.ok) {
-    const err = new Error(
-      explain(result?.error?.code) || "客服暂时不可用，请稍后再试。",
-    );
-    err.code = result?.error?.code;
-    throw err;
+  const requestSession = session;
+  const ensureCurrent = () => {
+    if (session !== requestSession) throw new StaleResponse();
+  };
+  try {
+    const response = await fetch("/api/v1/public/" + pid + path, {
+      method: options.method || "GET",
+      credentials: "omit",
+      cache: "no-store",
+      headers: {
+        ...(requestSession ? { Authorization: "Visitor " + requestSession.token } : {}),
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+    ensureCurrent();
+    if (response.ok && options.onEvent) {
+      const result = await readEvents(response, (event, value) => {
+        if (session === requestSession) options.onEvent(event, value);
+      });
+      ensureCurrent();
+      return result;
+    }
+    const result = response.status === 204 ? null : await response.json();
+    ensureCurrent();
+    if (!response.ok) {
+      const err = new Error(
+        explain(result?.error?.code) || "客服暂时不可用，请稍后再试。",
+      );
+      err.code = result?.error?.code;
+      throw err;
+    }
+    return result;
+  } catch (error) {
+    ensureCurrent();
+    throw error;
   }
-  return result;
 }
 function showError(error) {
+  if (error.name === "StaleResponse") return;
   if (error.code === "visitor_authentication_required") {
     session = null;
     pending = null;
@@ -80,9 +99,11 @@ function save() {
   sessionState.set(key, JSON.stringify({ session, pending }));
 }
 async function loadHistory(next = 0) {
+  const ticket = ++historyEpoch;
   const rows = await api(
     `/sessions/${session.id}/messages?limit=50&offset=${next}`,
   );
+  if (ticket !== historyEpoch) return;
   offset = next;
   thread.replaceChildren(
     ...rows.map((m) =>
@@ -151,7 +172,9 @@ async function loadRating() {
 }
 async function runtime() {
   if (!session) return;
+  const ticket = ++runtimeEpoch;
   const result = await api(`/sessions/${session.id}/status`);
+  if (ticket !== runtimeEpoch) return;
   runs.textContent = result
     ? `${{ model_running: "模型请求中", retrieving: "检索知识中", tool_running: "只读工具执行中", completed: "已完成", failed: "调用失败" }[result.phase] || result.phase}${result.error_category ? " · " + result.error_category : ""}`
     : "";
@@ -229,7 +252,6 @@ function render() {
     } catch (error) {
       showError(error);
     } finally {
-      clearInterval(poll);
       busy = false;
       send.disabled = false;
     }
@@ -328,4 +350,3 @@ try {
     message(error.message, "error"),
   );
 }
-window.addEventListener("pagehide", () => clearInterval(poll));

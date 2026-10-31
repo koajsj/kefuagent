@@ -93,13 +93,12 @@ export function createClient(fetcher = globalThis.fetch.bind(globalThis)) {
           error.status = response.status;
           error.code = value?.error?.code;
           error.requestId = value?.request_id;
-          if (response.status === 401 && path !== "/web-session")
-            unauthorized();
+          if ((response.status === 401 && path !== "/web-session") ||
+              error.code === "authentication_required") unauthorized();
           throw error;
         }
         return value;
       } catch (error) {
-        if (error.code === "authentication_required") unauthorized();
         if (epoch !== generation) throw new StaleResponse();
         if (error instanceof TypeError)
           throw new Error(

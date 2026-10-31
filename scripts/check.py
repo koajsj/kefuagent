@@ -10,6 +10,7 @@ from support_agent.config import Settings
 
 
 def main():
+    os.environ["ALLOW_EXTERNAL_MODELS"] = "false"
     settings = Settings()
     if "TEST_DATABASE_URL" not in os.environ:
         local_url = make_url(settings.database_url.get_secret_value())
@@ -27,18 +28,22 @@ def main():
         ([sys.executable, "-m", "ruff", "check", "."], None),
         ([sys.executable, "-m", "ruff", "format", "--check", "."], None),
         ([sys.executable, "-m", "alembic", "check"], None),
-        (
-            [sys.executable, "-m", "alembic", "check"],
-            os.environ
-            | {
-                "DATABASE_URL": os.environ["TEST_DATABASE_URL"],
-                "MIGRATION_DATABASE_URL": os.environ["TEST_DATABASE_URL"],
-            },
-        ),
-        ([sys.executable, "-m", "pytest"], None),
     ]
+    migration_url = settings.migration_database_url or settings.database_url
+    if make_url(migration_url.get_secret_value()) != make_url(os.environ["TEST_DATABASE_URL"]):
+        checks.append(
+            (
+                [sys.executable, "-m", "alembic", "check"],
+                os.environ
+                | {
+                    "DATABASE_URL": os.environ["TEST_DATABASE_URL"],
+                    "MIGRATION_DATABASE_URL": os.environ["TEST_DATABASE_URL"],
+                },
+            )
+        )
+    checks.append(([sys.executable, "-m", "pytest"], None))
     for command, env in checks:
-        result = subprocess.run(command, env=env, timeout=60 if "pytest" in command else 30)
+        result = subprocess.run(command, env=env, timeout=30)
         if result.returncode:
             raise SystemExit(result.returncode)
 

@@ -245,7 +245,7 @@ def finish(
     db.flush()
 
 
-def context_after_io(db, context, call_id, request, completion=None, failure=None):
+def context_after_io(db, context, call_id, request):
     try:
         return resume_context(db, context, request)
     except AppError:
@@ -449,7 +449,7 @@ def turn(db, context, conversation_id, data, request):
             tool_execution.ensure_delivery(
                 db, context, call, executions(db, context, call_id), request
             )
-            kwargs = {"runtime": RuntimeConfig.model_validate(config.runtime).model_dump()}
+            runtime = RuntimeConfig.model_validate(config.runtime)
             tools = tool_execution.authorized_tools(
                 db, context, config.id, request.app.state.tool_registry
             )
@@ -464,7 +464,7 @@ def turn(db, context, conversation_id, data, request):
                 }
                 for t in tools
             ]
-            budget = kwargs["runtime"]["max_input_tokens"]
+            budget = runtime.max_input_tokens
 
             # Trim complete historical pairs only; never remove in-turn call/result protocol pairs.
             def size(specs=specs):
@@ -489,9 +489,6 @@ def turn(db, context, conversation_id, data, request):
             remaining = int(deadline - time.monotonic())
             if remaining < 1:
                 raise AppError(409, "turn_timeout", "Agent turn time budget exhausted")
-            kwargs["runtime"]["timeout_seconds"] = min(
-                remaining, kwargs["runtime"]["timeout_seconds"]
-            )
             db.commit()
             completion = failure = None
             try:
@@ -505,13 +502,13 @@ def turn(db, context, conversation_id, data, request):
                     task=data.task
                     if data.task != "auto"
                     else model_runtime.infer_task(data.content, tools=bool(specs)),
-                    timeout=kwargs["runtime"]["timeout_seconds"],
+                    timeout=min(remaining, runtime.timeout_seconds),
                 )
             except ProviderFailure as exc:
                 failure = exc
             except Exception:
                 failure = ProviderFailure("provider_internal_error", attempts=None)
-            context = context_after_io(db, context, call_id, request, completion, failure)
+            context = context_after_io(db, context, call_id, request)
             get_owned(db, Conversation, context, conversation_id, lock=True)
             call = tool_execution.live_call(db, context, call_id)
             # Persist observed usage even if configuration was revoked during transport.

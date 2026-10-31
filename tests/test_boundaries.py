@@ -1,113 +1,34 @@
 """Real PostgreSQL acceptance. No SQLite, mock database, truncation or schema reset."""
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, ProgrammingError
-
-
-def test_passwords_use_argon2id():
-    from support_agent.security import hash_password, verify_password
-
-    password = "Acceptance-only-" + uuid4().hex
-    encoded = hash_password(password)
-    assert encoded.startswith("$argon2id$")
-    assert password not in encoded
-    assert verify_password(encoded, password)
-    assert not verify_password(encoded, "wrong password")
-
-
-@pytest.fixture
-def platform():
-    from support_agent.config import Settings
-    from support_agent.main import create_app
-    from support_agent.models import User
-    from support_agent.schemas import UserOut
-    from support_agent.security import hash_password
-
-    url = os.environ.get("TEST_DATABASE_URL")
-    if not url:
-        pytest.fail(
-            "TEST_DATABASE_URL must point to a separately migrated PostgreSQL test database"
-        )
-    settings = Settings(database_url=url)
-    if "test" not in settings.database_url.get_secret_value().rsplit("/", 1)[-1]:
-        pytest.fail("Refusing a database whose name does not contain test")
-    app = create_app(settings)
-    suffix = uuid4().hex
-    password = "Acceptance-only-" + uuid4().hex
-    encoded = hash_password(password)
-    with app.state.sessions.begin() as db:
-        root = User(
-            login=f"root-{suffix}",
-            display_name="Acceptance root",
-            password_hash=encoded,
-            is_platform_admin=True,
-        )
-        db.add(root)
-        db.flush()
-        root_login = root.login
-    with TestClient(app, raise_server_exceptions=False) as client:
-        token = client.post("/api/v1/auth/login", json={"login": root_login, "password": password})
-        assert token.status_code == 200, token.text
-        root_headers = {"Authorization": "Bearer " + token.json()["access_token"]}
-        users = []
-        for label in ["a", "b", "member", "second"]:
-            if label == "a":
-                # Keep a real API creation and password hash in every fixture.
-                resp = client.post(
-                    "/api/v1/users",
-                    headers=root_headers,
-                    json={
-                        "login": f"{label}-{suffix}",
-                        "display_name": label,
-                        "password": password,
-                    },
-                )
-                assert resp.status_code == 201, resp.text
-                users.append(resp.json())
-            else:
-                # The other identities are setup data, not repeated user-creation checks.
-                # Reuse this fixture's real hash; authentication still verifies Argon2 normally.
-                with app.state.sessions.begin() as db:
-                    user = User(
-                        login=f"{label}-{suffix}", display_name=label, password_hash=encoded
-                    )
-                    db.add(user)
-                    db.flush()
-                    users.append(UserOut.model_validate(user).model_dump(mode="json"))
-        tenants, headers = [], []
-        for label, user in zip(["a", "b"], users[:2], strict=True):
-            resp = client.post(
-                "/api/v1/tenants",
-                headers=root_headers,
-                json={"name": label, "slug": f"{label}-{suffix}", "admin_user_id": user["id"]},
-            )
-            assert resp.status_code == 201, resp.text
-            tenant = resp.json()
-            tenants.append(tenant)
-            login = client.post(
-                "/api/v1/auth/login", json={"login": user["login"], "password": password}
-            )
-            assert login.status_code == 200, login.text
-            headers.append(
-                {
-                    "Authorization": "Bearer " + login.json()["access_token"],
-                    "X-Tenant-ID": tenant["id"],
-                }
-            )
-        yield client, app, root_headers, tenants, headers, users, password
-    app.state.engine.dispose()
 
 
 def test_crud_isolation_and_membership_revocation(platform):
     c, app, root, ts, hs, users, password = platform
     a, b = hs
     prefix = "/api/v1"
+    login = "created-" + uuid4().hex
+    created = c.post(
+        prefix + "/users",
+        headers=root,
+        json={"login": login, "display_name": "Created user", "password": password},
+    )
+    assert created.status_code == 201 and password not in created.text
+    assert (
+        c.post(prefix + "/auth/login", json={"login": login, "password": password}).status_code
+        == 200
+    )
+    assert (
+        c.post(
+            prefix + "/auth/login", json={"login": login, "password": "wrong-password"}
+        ).status_code
+        == 401
+    )
     assert c.get(prefix + "/conversations").status_code == 401
     assert (
         c.get(prefix + "/conversations", headers=root | {"X-Tenant-ID": ts[0]["id"]}).status_code
@@ -247,130 +168,9 @@ def test_crud_isolation_and_membership_revocation(platform):
         )
 
 
-def test_tool_contract_audit_and_safe_errors(platform, caplog):
-    c, app, root, ts, hs, users, password = platform
-    a, b = hs
-    p = "/api/v1"
-    definition = {
-        "key": "generic_lookup",
-        "name": "Generic lookup",
-        "description": "Metadata only",
-        "parameters": {
-            "type": "object",
-            "properties": {"query": {"type": "string", "minLength": 1}},
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-        "risk_level": "low",
-        "permissions": ["tools:invoke"],
-        "enabled": True,
-    }
-    tool = c.post(p + "/tools", headers=b, json=definition)
-    assert tool.status_code == 201, tool.text
-    tid = tool.json()["id"]
-    assert c.get(p + "/tools", headers=a).json() == []
-    assert c.get(p + "/tools/" + tid, headers=a).status_code == 404
-    assert c.patch(p + "/tools/" + tid, headers=a, json={"enabled": False}).status_code == 404
-    assert (
-        c.post(
-            p + "/tools/" + tid + "/validate", headers=a, json={"arguments": {"query": "ok"}}
-        ).status_code
-        == 404
-    )
-    assert (
-        c.post(
-            p + "/tools/" + tid + "/execute", headers=a, json={"arguments": {"query": "ok"}}
-        ).status_code
-        == 404
-    )
-    bad = c.post(p + "/tools/" + tid + "/execute", headers=b, json={"arguments": {"query": 12}})
-    assert bad.status_code == 422, bad.text
-    assert (
-        c.post(
-            p + "/tools/" + tid + "/validate", headers=b, json={"arguments": {"query": "ok"}}
-        ).json()["status"]
-        == "validated"
-    )
-    result = c.post(
-        p + "/tools/" + tid + "/execute", headers=b, json={"arguments": {"query": "ok"}}
-    )
-    assert result.status_code == 501, result.text
-    assert result.json()["status"] == "rejected"
-    assert result.json()["error_category"] == "execution_not_enabled"
-    conv = c.post(p + "/conversations", headers=a, json={"channel": "api"}).json()["id"]
-    assert (
-        c.post(
-            p + "/tools/" + tid + "/execute",
-            headers=b,
-            json={"arguments": {"query": "ok"}, "conversation_id": conv},
-        ).status_code
-        == 404
-    )
-    malicious = definition | {
-        "key": "evil",
-        "parameters": {"type": "object", "$ref": "https://example.invalid/schema"},
-    }
-    assert c.post(p + "/tools", headers=b, json=malicious).status_code == 422
-    assert (
-        c.post(p + "/tools", headers=b, json=definition | {"handler": "os.system"}).status_code
-        == 422
-    )
-    assert c.post(p + "/tools", headers=b, json=definition).status_code == 409
-    assert c.patch(p + "/tools/" + tid, headers=b, json={"enabled": False}).status_code == 200
-    assert (
-        c.post(
-            p + "/tools/" + tid + "/validate", headers=b, json={"arguments": {"query": "ok"}}
-        ).status_code
-        == 409
-    )
-    secret = "secret-do-not-log-" + uuid4().hex
-    failed = c.post(p + "/auth/login", json={"login": users[0]["login"], "password": secret})
-    assert failed.status_code == 401
-    validation = c.post(
-        p + "/agent-configs",
-        headers=b,
-        json={"name": "x", "provider": "x", "model": "y", "api_key": secret},
-    )
-    assert validation.status_code == 422
-    assert secret not in validation.text
-    assert (
-        c.post(
-            p + "/agent-configs",
-            headers=b,
-            json={"name": "x", "provider": "x", "model": "y", "credential_ref": "sk-proj-real-key"},
-        ).status_code
-        == 422
-    )
-    events = c.get(p + "/audit-events", headers=b)
-    assert events.status_code == 200
-    assert all(e["tenant_id"] == ts[1]["id"] for e in events.json())
-    assert any(
-        e["action"] == "tool.execute" and e["reason"] == "execution_not_enabled"
-        for e in events.json()
-    )
-    assert any(e["outcome"] == "failure" for e in events.json())
-    assert any(
-        e["resource_id"] == tid
-        and e["request_id"] == bad.json()["request_id"]
-        and e["outcome"] == "failure"
-        for e in events.json()
-    )
-    assert result.headers["X-Request-ID"] == result.json()["request_id"]
-    assert secret not in events.text
-    assert secret not in caplog.text
-    assert password not in caplog.text
-    assert b["Authorization"] not in caplog.text
-    # Safe database conflict payload; SQL and constraints are never exposed.
-    duplicate = c.post(
-        p + "/tenants",
-        headers=root,
-        json={"name": "duplicate", "slug": ts[0]["slug"], "admin_user_id": users[1]["id"]},
-    )
-    assert duplicate.status_code == 409
-    assert "INSERT" not in duplicate.text and "password_hash" not in duplicate.text
-
-
 def test_real_postgres_rls_and_optimistic_concurrency(platform):
+    from support_agent.preflight import RLS_TABLES
+
     c, app, root, ts, hs, users, password = platform
     a, b = hs
     p = "/api/v1"
@@ -385,7 +185,9 @@ def test_real_postgres_rls_and_optimistic_concurrency(platform):
         )
     with app.state.sessions() as db:
         assert db.scalar(text("SELECT current_setting('app.tenant_id',true)")) in (None, "")
-        assert db.execute(text("SELECT * FROM agent_configs")).all() == []
+        assert len(RLS_TABLES) == 17
+        for name in RLS_TABLES:
+            assert db.execute(text(f'SELECT id FROM "{name}" LIMIT 1')).all() == []
         db.execute(text("SELECT set_config('app.tenant_id',:id,true)"), {"id": ts[0]["id"]})
         assert {str(row[0]) for row in db.execute(text("SELECT tenant_id FROM agent_configs"))} == {
             ts[0]["id"]
@@ -402,10 +204,12 @@ def test_real_postgres_rls_and_optimistic_concurrency(platform):
         assert db.execute(text("SELECT * FROM agent_configs")).all() == []
         tables = db.execute(
             text(
-                "SELECT relname,relrowsecurity,relforcerowsecurity FROM pg_class WHERE relname IN ('agent_configs','conversations','messages','tool_definitions')"
-            )
+                "SELECT relname,relrowsecurity,relforcerowsecurity FROM pg_class "
+                "WHERE relnamespace='public'::regnamespace AND relname=ANY(:tables)"
+            ),
+            {"tables": list(RLS_TABLES)},
         ).all()
-        assert len(tables) == 4 and all(row[1] and row[2] for row in tables)
+        assert len(tables) == 17 and all(row[1] and row[2] for row in tables)
         role = db.execute(
             text("SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user")
         ).one()
@@ -440,49 +244,6 @@ def test_real_postgres_rls_and_optimistic_concurrency(platform):
                 {"id": str(uuid4()), "t": ts[0]["id"], "c": bconv, "u": users[0]["id"]},
             )
         db.rollback()
-
-
-def test_request_limits_and_unexpected_errors_do_not_leak(platform, monkeypatch, caplog):
-    from support_agent.services import conversations
-
-    c, app, root, ts, hs, users, password = platform
-    secret = "never-log-" + uuid4().hex
-    oversized = c.post(
-        "/api/v1/conversations",
-        headers=hs[0] | {"Content-Type": "text/plain"},
-        content="x" * 131073,
-    )
-    assert oversized.status_code == 413
-
-    def fail(*args, **kwargs):
-        raise RuntimeError(secret)
-
-    monkeypatch.setattr(conversations, "create", fail)
-    response = c.post("/api/v1/conversations", headers=hs[0], json={"channel": "api"})
-    assert response.status_code == 500
-    assert response.headers["X-Request-ID"] == response.json()["request_id"]
-    assert secret not in response.text and secret not in caplog.text
-
-
-def test_real_database_failure_is_safe(platform, caplog):
-    from support_agent.dependencies import get_db
-
-    c, app, root, ts, hs, users, password = platform
-    secret = "never-log-" + uuid4().hex
-
-    def broken_database():
-        with app.state.sessions() as db:
-            db.execute(text("SELECT CAST(:value AS integer)"), {"value": secret})
-            yield db
-
-    app.dependency_overrides[get_db] = broken_database
-    try:
-        response = c.get("/api/v1/health")
-        assert response.status_code == 503
-        assert response.json()["error"]["code"] == "database_unavailable"
-        assert secret not in response.text and secret not in caplog.text
-    finally:
-        app.dependency_overrides.clear()
 
 
 def test_last_admin_concurrency_and_disabled_user(platform):

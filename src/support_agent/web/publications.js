@@ -36,12 +36,16 @@ export async function publicationsPage(ctx) {
       agents.map((a) => ({ id: a.id, name: a.name + " · " + a.provider })),
     );
     const toolChoices = el("div");
-    let options = [];
+    let options = [], choiceEpoch = 0;
     async function choose() {
+      const ticket = ++choiceEpoch;
+      options = [];
+      toolChoices.replaceChildren();
       const [grants, tools] = await Promise.all([
         ctx.api(`/agent-configs/${agentSelect.value}/tools`),
         collection(ctx.api, "/tools"),
       ]);
+      if (ticket !== choiceEpoch) return;
       options = tools
         .filter(
           (t) =>

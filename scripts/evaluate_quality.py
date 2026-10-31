@@ -15,7 +15,7 @@ from support_agent.evaluation import markdown
 
 
 def main():
-    parser = argparse.ArgumentParser(description="离线 Mock 客服质量与检索评测，不调用真实模型")
+    parser = argparse.ArgumentParser(description="三项离线文档召回评测，不调用模型")
     parser.add_argument("--compare", type=Path, help="比较同版本数据集报告")
     parser.add_argument("--output", type=Path, default=Path(".local/evaluations"))
     args = parser.parse_args()
@@ -36,12 +36,13 @@ def main():
             sys.executable,
             "-m",
             "pytest",
-            "tests/test_quality.py::test_offline_customer_quality_set",
+            "tests/test_quality.py::test_offline_retrieval_quality_set",
             "-q",
             "--tb=short",
         ],
         env=os.environ | {"P4_EVAL_REPORT": str(report.resolve())},
         check=False,
+        timeout=30,
     )
     if result.returncode:
         raise SystemExit(result.returncode)

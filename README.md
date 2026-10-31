@@ -2,7 +2,7 @@
 
 可独立部署的多租户客服产品：管理工作台、知识库、模型凭证、客服会话、只读工具、公开客服链接和网站嵌入。Python / FastAPI / PostgreSQL 模块化单体；没有行业连接器、任意代码插件、Redis、Celery 或向量服务。
 
-**当前 0.7.0（P8）**：增加企业客服队列、负责人分配、内部协作备注和轻量 SLA；会话级可追溯摘录记忆；真实数据运营 Dashboard 与访客反馈；只读配置预检及可选 Compose。保留 P7 的检索、安全 SSE、密钥维护和保留策略。真实模型/摘要语义、GUI 和容器部署仍未验收，P7 远端 CI 首次超时。见 [P8 实施与验收](docs/P8_ACCEPTANCE.md) 和 [可选部署](docs/P8_DEPLOYMENT.md)；[P7 记录](docs/P7_ACCEPTANCE.md)、[P6 记录](docs/ACCEPTANCE.md) 保留。
+**当前 0.7.1（P9）**：精简跨阶段重复回归，保留 28 项 Python / 3 项 JavaScript 关键检查；增加静态模块/DOM 契约，修复前端过期响应和工作区计数加载。P8 的客服队列、会话摘录记忆、运营 Dashboard、访客反馈、preflight/可选 Compose 均保留。真实模型/摘要语义、GUI 和容器部署仍未验收，未查询远端 CI。见 [P9 质量治理](docs/P9_ACCEPTANCE.md)、[P8 功能与口径](docs/P8_ACCEPTANCE.md) 和 [可选部署](docs/P8_DEPLOYMENT.md)。
 
 ## 本机启动
 
@@ -148,13 +148,13 @@ uv run python scripts/check.py
 node --test tests/web.test.mjs
 ```
 
-检查脚本执行 Ruff、格式、dev/test Alembic 差异和有界 PostgreSQL/Mock 回归。外部环境必须指定独立 TEST_DATABASE_URL（库名含 test），不模拟真实数据库、不清库；测试只追加随机数据并删除自身创建的文档。P6 基线 51 项 Python / 4 项 JS；P7 为 54 / 5 项；P8 最多 56 / 6 项，Python 单次全量硬上限 60 秒。离线质量评测和 CI 说明见下方链接。
+检查脚本执行 Ruff、格式、dev/test Alembic 差异和有界 PostgreSQL/Mock 回归。外部环境必须指定独立 TEST_DATABASE_URL（库名含 test），不模拟真实数据库、不清库；测试只追加随机数据并删除自身创建的文档。P9 本机 28 项 Python 通过，21.53 秒（进程上限 30 秒）；3 项 JS 通过，约 0.085 秒（进程上限 3 秒）。耗时随环境变化。重复或简单边界改为源码审查，静态检查不代表那些历史运行场景重新通过。离线质量评测和 CI 说明见下方链接。
 
 已在本机隔离副本验证数据库、文档和密钥恢复；未进行真实模型、浏览器 GUI、生产 Linux/HTTPS 或负载验收；不承诺已完成生产质量验收。SSE 只在最终校验后交付答案，尚无上游逐 token 输出、匿名人机验证、审批写工具、完整全渠道人工工作台、全链路隐私擦除或无停机密钥分发。保留策略默认关闭，CLI 执行需要显式确认。内部成员共享企业会话可见性；负责人限制人工控制，不是个人私有收件箱。
 
 常见问题：401 检查登录/访客令牌期限；403 检查成员角色、Origin 与企业；409 检查版本、忙会话与幂等键；413/422 检查文件与 Schema/地址白名单；503 检查数据库、主密钥、PUBLIC_RATE_KEY 和迁移。失败响应仅分类/关联 ID，不回显输入/堆栈。不要用清库或关闭安全校验解决。
 
-P7 专项：[离线质量评测与检索](docs/P7_QUALITY.md)、[SSE / 密钥轮换与恢复 / 数据保留 / CI](docs/P7_RUNTIME.md)。`uv run python scripts/evaluate_quality.py --compare OLD_REPORT.json` 可生成同版本比较；不提供默认开启的真实模型评测。
+P7 专项：[离线质量评测与检索](docs/P7_QUALITY.md)、[SSE / 密钥轮换与恢复 / 数据保留 / CI](docs/P7_RUNTIME.md)。`uv run python scripts/evaluate_quality.py --compare OLD_REPORT.json` 可生成三项词面召回报告；只有相同数据集和配置版本才比较；不提供默认开启的真实模型评测。
 
 详细资料：[架构](docs/ARCHITECTURE.md)、[开源来源](docs/OPEN_SOURCE_REUSE.md)、[运行安全与保留](docs/OPERATIONS.md)、[Linux/备份/升级](docs/DEPLOYMENT.md)。本项目当前不接入任何行业系统。项目代码采用 [MIT License](LICENSE)，版权署名 koajsj；第三方依赖保留各自许可证，见 [依赖授权](docs/DEPENDENCY_LICENSES.md)。
 

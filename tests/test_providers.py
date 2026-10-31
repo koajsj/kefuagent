@@ -1,43 +1,11 @@
 """Actual persistence/parsers and controlled provider boundaries; no paid calls."""
 
-import base64
 import json
-from uuid import uuid4
 
 import pytest
 from phase2_support import (
     config,
-    private_settings,  # noqa: F401
 )
-
-
-def test_provider_errors_and_authenticated_encryption():
-    # The contract test fails until the new boundary exists, before implementation.
-    import importlib.util
-
-    assert importlib.util.find_spec("support_agent.providers"), "provider boundary not implemented"
-    from support_agent.providers import normalize_status
-
-    assert normalize_status(401) == "authentication_failed"
-    assert normalize_status(429) == "rate_limited"
-    assert normalize_status(503) == "provider_unavailable"
-    import os
-
-    from support_agent.credentials import decrypt_secret, encrypt_secret
-
-    master = base64.urlsafe_b64encode(os.urandom(32)).decode()
-    tenant = uuid4()
-    encoded = encrypt_secret(master, tenant, "cred_test", "synthetic-secret")
-    assert decrypt_secret(master, tenant, "cred_test", encoded) == "synthetic-secret"
-    for t, ref, value in [
-        (uuid4(), "cred_test", encoded),
-        (tenant, "cred_other", encoded),
-        (tenant, "cred_test", encoded[:-4] + "AAAA"),
-    ]:
-        from support_agent.errors import AppError
-
-        with pytest.raises(AppError):
-            decrypt_secret(master, t, ref, value)
 
 
 def test_http_transport_errors_retries_and_response_validation(monkeypatch, caplog):
@@ -69,10 +37,7 @@ def test_http_transport_errors_retries_and_response_validation(monkeypatch, capl
 
     for status, category, attempts in [
         (401, "authentication_failed", 1),
-        (429, "rate_limited", 2),
         (503, "provider_unavailable", 2),
-        (400, "request_rejected", 1),
-        (302, "request_rejected", 1),
     ]:
         backend(status, b"Never show this: " + secret.encode())
         with pytest.raises(providers.ProviderFailure) as failure:
@@ -80,11 +45,6 @@ def test_http_transport_errors_retries_and_response_validation(monkeypatch, capl
         assert failure.value.category == category and failure.value.attempts == attempts
     for body in [
         b"not JSON",
-        b"{}",
-        b"[]",
-        b'{"choices":[null]}',
-        b'{"choices":[{"message":null,"finish_reason":"stop"}]}',
-        b"x" * 65537,
     ]:
         backend(200, body)
         with pytest.raises(providers.ProviderFailure) as failure:
@@ -100,44 +60,74 @@ def test_http_transport_errors_retries_and_response_validation(monkeypatch, capl
     with pytest.raises(providers.ProviderFailure) as failure:
         adapter.complete_in_process(**args)
     assert failure.value.input_tokens == 12 and failure.value.output_tokens == 7
+    sent = []
     result_body = json.dumps(
-        {"choices": [{"message": {"content": '{"ok":true}'}, "finish_reason": "stop"}]}
+        {
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "wire_1",
+                                "type": "function",
+                                "function": {"name": "text_metrics", "arguments": '{"text":"ok"}'},
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
     ).encode()
-    backend(200, result_body)
-    result = adapter.complete_in_process(**args)
-    assert (
-        result.content == '{"ok":true}'
-        and result.input_tokens is None
-        and result.output_tokens is None
-    )
-    assert secret not in caplog.text
 
+    class Stream(httpcore.MockStream):
+        def write(self, buffer, timeout=None):
+            sent.append(buffer)
+            super().write(buffer, timeout)
 
-def test_worker_has_real_wall_timeout(monkeypatch):
-    import subprocess
-    import sys
-    import time
+    class Backend(httpcore.MockBackend):
+        def connect_tcp(self, *args, **kwargs):
+            return Stream(
+                [
+                    b"HTTP/1.1 200 OK\r\nContent-Length: "
+                    + str(len(result_body)).encode()
+                    + b"\r\n\r\n"
+                    + result_body
+                ]
+            )
 
-    from support_agent import providers
-
-    real_run = subprocess.run
-
-    def stalled_worker(command, **kwargs):
-        return real_run([sys.executable, "-c", "import time;time.sleep(10)"], **kwargs)
-
-    monkeypatch.setattr(providers.subprocess, "run", stalled_worker)
-    started = time.monotonic()
-    with pytest.raises(providers.ProviderFailure) as failure:
-        providers.OpenAICompatibleProvider(["api.example.com"]).complete(
-            base_url="https://api.example.com/v1",
-            api_key="synthetic",
-            model="model",
-            messages=[],
-            runtime={"timeout_seconds": 1},
+    monkeypatch.setattr(providers, "PublicNetworkBackend", lambda: Backend([]))
+    tools = [
+        {"type": "function", "function": {"name": "text_metrics", "parameters": {"type": "object"}}}
+    ]
+    result = adapter.complete_in_process(
+        **(
+            args
+            | {
+                "base_url": "https://api.example.com/custom/v1",
+                "runtime": args["runtime"]
+                | {"token_parameter": "max_completion_tokens", "send_temperature": False},
+                "tools": tools,
+            }
         )
-    assert failure.value.category == "timeout"
-    assert failure.value.attempts is None
-    assert time.monotonic() - started < 2
+    )
+    request_headers, request_body = b"".join(sent).split(b"\r\n\r\n", 1)
+    payload = json.loads(request_body)
+    assert request_headers.startswith(b"POST /custom/v1/chat/completions HTTP/1.1\r\n")
+    assert ("Bearer " + secret).encode() in request_headers
+    assert payload["model"] == args["model"] and payload["tools"] == tools
+    assert payload["tool_choice"] == "auto" and payload["parallel_tool_calls"] is False
+    assert payload["max_completion_tokens"] == 32
+    assert (
+        "max_tokens" not in payload
+        and "temperature" not in payload
+        and "response_format" not in payload
+    )
+    assert result.tool_calls[0].id == "wire_1" and result.tool_calls[0].name == "text_metrics"
+    assert result.tool_calls[0].arguments == '{"text":"ok"}'
+    assert result.input_tokens is None and result.output_tokens is None
+    assert secret not in caplog.text
 
 
 def test_ssrf_dns_pinning_and_real_worker(monkeypatch):

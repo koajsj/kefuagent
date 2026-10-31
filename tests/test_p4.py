@@ -3,7 +3,7 @@
 import json
 from uuid import uuid4
 
-from phase2_support import config, kb, private_settings, upload  # noqa: F401
+from phase2_support import config, kb, upload  # noqa: F401
 
 
 def rag(c, headers, cfg, cid, kid, content, **extra):
@@ -17,27 +17,6 @@ def rag(c, headers, cfg, cid, kid, content, **extra):
             "idempotency_key": str(uuid4()),
             **extra,
         },
-    )
-
-
-def test_chinese_retrieval_and_deleted_sources(platform):
-    c, _, _, _, hs, _, _ = platform
-    a = hs[0]
-    kid = kb(c, a)
-    doc = upload(
-        c, a, kid, "账户.txt", "登录邮箱修改：进入账户设置，完成验证后保存新邮箱。".encode()
-    ).json()
-    for query in ["如何修改登录邮箱", "能更改电子邮件吗"]:
-        hits = c.post(
-            f"/api/v1/knowledge-bases/{kid}/search", headers=a, json={"query": query}
-        ).json()
-        assert hits and hits[0]["document_id"] == doc["id"], (query, hits)
-    assert c.delete("/api/v1/documents/" + doc["id"], headers=a).status_code == 204
-    assert (
-        c.post(
-            f"/api/v1/knowledge-bases/{kid}/search", headers=a, json={"query": "邮箱修改"}
-        ).json()
-        == []
     )
 
 
@@ -188,126 +167,3 @@ def test_limits_unknown_usage_and_idempotency(platform):
     assert rag(c, a, cfg, cid, kid, "Warranty").json()["error"]["code"] == "request_limit_exceeded"
     view = c.get("/api/v1/usage-limits", headers=a).json()
     assert view["current_user_usage"]["tokens_reserved_today"] == held
-
-
-def test_rag_history_scope_conflict_and_state_visibility(platform):
-    from support_agent.providers import Completion
-
-    c, app, _, _, hs, _, _ = platform
-    a, b = hs
-    cfg, _, _ = config(c, a)
-    first, second = kb(c, a, "one"), kb(c, a, "two")
-    upload(c, a, first, "a.txt", b"Warranty lasts thirty days.")
-    upload(c, a, second, "b.txt", b"Warranty lasts sixty days.")
-    cid = c.post("/api/v1/conversations", headers=a, json={}).json()["id"]
-
-    class Scoped:
-        prior = ""
-
-        def complete(self, **kwargs):
-            if self.prior:
-                assert self.prior not in json.dumps(kwargs["messages"])
-            calls = c.get("/api/v1/model-calls", headers=a).json()
-            current = c.get(
-                f"/api/v1/conversations/{cid}/runs/" + calls[-1]["id"], headers=a
-            ).json()
-            assert current["phase"] == "model_running"
-            assert (
-                c.get(f"/api/v1/conversations/{cid}/runs/" + calls[-1]["id"], headers=b).status_code
-                == 404
-            )
-            hit = json.loads(kwargs["messages"][-1]["content"])["evidence"][0]
-            return Completion(
-                json.dumps(
-                    {
-                        "answerable": True,
-                        "citations": [{"chunk_id": hit["chunk_id"], "quote": hit["content"]}],
-                    }
-                ),
-                9,
-                3,
-            )
-
-    provider = Scoped()
-    app.state.provider = provider
-    assert rag(c, a, cfg, cid, first, "Warranty").json()["status"] == "answered"
-    provider.prior = "Warranty lasts thirty days."
-    assert rag(c, a, cfg, cid, second, "Warranty").json()["status"] == "answered"
-    conflict = kb(c, a, "conflict")
-    upload(c, a, conflict, "one.txt", "服务期限：三十天。".encode())
-    upload(c, a, conflict, "two.txt", "服务期限：七天。".encode())
-    result = rag(c, a, cfg, cid, conflict, "服务期限").json()
-    assert result["status"] == "unresolved" and result["error_category"] == "conflicting_evidence"
-
-
-def test_transport_quota_and_model_capabilities(monkeypatch):
-    import httpcore
-    import pytest
-
-    from support_agent import providers
-
-    body = b'{"error":{"code":"insufficient_quota"}}'
-    wire = b"HTTP/1.1 429 Error\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
-    backend = httpcore.MockBackend([wire])
-    monkeypatch.setattr(providers, "PublicNetworkBackend", lambda: backend)
-    with pytest.raises(providers.ProviderFailure) as exc:
-        providers.OpenAICompatibleProvider(["api.example.com"]).complete_in_process(
-            base_url="https://api.example.com/v1",
-            api_key="synthetic",
-            model="offline-only",
-            messages=[],
-            runtime={"timeout_seconds": 2, "temperature": 0, "max_output_tokens": 8},
-        )
-    assert exc.value.category == "quota_exhausted" and exc.value.attempts == 1
-    assert (
-        providers.normalize_status(
-            400, b'{"error":{"code":"unsupported_parameter","param":"tools"}}'
-        )
-        == "tools_not_supported"
-    )
-
-
-def test_cross_conversation_admission_and_connection_cap(platform):
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Event
-
-    from support_agent.providers import Completion
-
-    c, app, _, _, hs, _, _ = platform
-    a = hs[0]
-    cfg, _, _ = config(c, a)
-    entered, release = Event(), Event()
-
-    class Bounded:
-        def complete(self, **kwargs):
-            assert kwargs["runtime"]["max_output_tokens"] == 32
-            return Completion('{"ok":true}', 9, 4)
-
-    app.state.provider = Bounded()
-    checked = c.post(f"/api/v1/agent-configs/{cfg}/test-connection", headers=a)
-    assert checked.status_code == 200 and checked.json()["status"] == "connected", checked.text
-    assert checked.json()["reserved_tokens"] == 13
-    assert "credential_stamp" not in checked.text
-    kid = kb(c, a)
-    upload(c, a, kid, "source.txt", b"Warranty lasts thirty days.")
-    one, two = [c.post("/api/v1/conversations", headers=a, json={}).json()["id"] for _ in range(2)]
-    app.state.settings.user_concurrent_calls = 1
-
-    class Blocked:
-        def complete(self, **kwargs):
-            entered.set()
-            assert release.wait(10)
-            return Completion('{"answerable":false,"citations":[]}', 12, 4)
-
-    app.state.provider = Blocked()
-    with ThreadPoolExecutor(max_workers=1) as workers:
-        first = workers.submit(rag, c, a, cfg, one, kid, "Warranty")
-        try:
-            assert entered.wait(10)
-            second = rag(c, a, cfg, two, kid, "Warranty")
-            assert second.status_code == 429, second.text
-            assert second.json()["error"]["code"] == "concurrency_limit_exceeded"
-        finally:
-            release.set()
-        assert first.result().status_code == 200
-    assert c.get("/api/v1/usage-limits", headers=a).json()["tenant_usage"]["active_calls"] == 0

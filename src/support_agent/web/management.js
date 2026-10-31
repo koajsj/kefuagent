@@ -372,14 +372,16 @@ export async function activityPage(ctx) {
     { id: "tools", name: "工具执行" },
     { id: "audit", name: "审计事件" },
   ];
-  let kind = "calls";
+  let kind = "calls", loadEpoch = 0;
   async function load(offset = 0) {
+    const ticket = ++loadEpoch;
     const path = {
       calls: "/model-calls",
       tools: "/tool-executions",
       audit: "/audit-events",
     }[kind];
     const rows = await ctx.api(`${path}?limit=20&offset=${offset}`);
+    if (ticket !== loadEpoch) return;
     const headers =
       kind === "calls"
         ? ["模型 / 状态", "用量", "原因", "时间", "详情"]

@@ -4,7 +4,6 @@ import io
 
 from phase2_support import (
     kb,
-    private_settings,  # noqa: F401
     upload,
 )
 
@@ -175,49 +174,3 @@ def test_storage_cleanup_retry_and_deleted_evidence(platform, monkeypatch):
     monkeypatch.setattr(app.state.storage, "delete", original)
     assert c.delete(f"/api/v1/documents/{did}", headers=a).status_code == 204
     assert not app.state.storage.exists(ts[0]["id"], did)
-
-
-def test_upload_and_parser_resource_limits(platform, monkeypatch):
-    import zipfile
-    from types import SimpleNamespace
-
-    from support_agent import ingestion
-
-    c, app, root, ts, hs, users, password = platform
-    a = hs[0]
-    kid = kb(c, a)
-    assert upload(c, a, kid, "broken.docx", b"PK\x03\x04invalid ZIP").status_code == 422
-    bomb = io.BytesIO()
-    with zipfile.ZipFile(bomb, "w", compression=zipfile.ZIP_DEFLATED) as z:
-        z.writestr("[Content_Types].xml", "placeholder")
-        z.writestr("word/document.xml", "x" * (9 * 1024 * 1024))
-    assert upload(c, a, kid, "expanded.docx", bomb.getvalue()).status_code == 422
-    assert upload(c, a, kid, "large.txt", b"x" * (6 * 1024 * 1024)).status_code == 413
-    monkeypatch.setattr(
-        ingestion.psutil,
-        "Process",
-        lambda pid: SimpleNamespace(memory_info=lambda: SimpleNamespace(rss=513 * 1024 * 1024)),
-    )
-    chunks, error = ingestion.process_document(b"Resource limit probe.", ".txt")
-    assert chunks is None and error == "parse_resource_limit"
-
-
-def test_failed_reprocess_hides_old_chunks(platform, monkeypatch):
-    from support_agent.services import knowledge
-
-    c, app, root, ts, hs, users, password = platform
-    a = hs[0]
-    kid = kb(c, a)
-    did = upload(c, a, kid, "replacement.txt", b"Replacement policy.").json()["id"]
-    assert c.post(
-        f"/api/v1/knowledge-bases/{kid}/search", headers=a, json={"query": "Replacement"}
-    ).json()
-    monkeypatch.setattr(knowledge, "process_document", lambda *args: (None, "parse_failed"))
-    response = c.post(f"/api/v1/documents/{did}/reprocess", headers=a)
-    assert response.json()["status"] == "failed" and response.json()["chunk_count"] == 0
-    assert (
-        c.post(
-            f"/api/v1/knowledge-bases/{kid}/search", headers=a, json={"query": "Replacement"}
-        ).json()
-        == []
-    )

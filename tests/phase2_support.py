@@ -1,19 +1,6 @@
-"""Synthetic credentials and bounded data for stage-two PostgreSQL acceptance."""
+"""Small API data helpers shared by the retained boundary checks."""
 
-import base64
 from uuid import uuid4
-
-import pytest
-
-
-@pytest.fixture(autouse=True)
-def private_settings(monkeypatch, tmp_path):
-    import os
-
-    monkeypatch.setenv("CREDENTIAL_MASTER_KEY", base64.urlsafe_b64encode(os.urandom(32)).decode())
-    monkeypatch.setenv("DOCUMENT_STORAGE_ROOT", str(tmp_path / "documents"))
-    monkeypatch.setenv("PUBLIC_RATE_KEY", "synthetic-public-test-rate-secret-" + uuid4().hex)
-    monkeypatch.setenv("MODEL_ALLOWED_HOSTS", '["api.example.com"]')
 
 
 def kb(c, headers, name="General"):
@@ -22,11 +9,11 @@ def kb(c, headers, name="General"):
     return r.json()["id"]
 
 
-def upload(c, headers, kid, filename, content, mime="application/octet-stream"):
+def upload(c, headers, kid, filename, content):
     return c.post(
         f"/api/v1/knowledge-bases/{kid}/documents",
         headers=headers,
-        files={"file": (filename, content, mime)},
+        files={"file": (filename, content, "application/octet-stream")},
     )
 
 

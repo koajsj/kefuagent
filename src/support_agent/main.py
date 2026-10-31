@@ -63,7 +63,7 @@ def create_app(settings: Settings | None = None):
 
     app = FastAPI(
         title="通用多租户客服平台",
-        version="0.7.0",
+        version="0.7.1",
         lifespan=lifespan,
         description="Tenant-scoped knowledge, verified-extract RAG and bounded, authorized read-only tool execution.",
         responses={

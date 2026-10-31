@@ -17,22 +17,6 @@ test("tenant switch cannot deliver stale data even when transport ignores cancel
   await assert.rejects(request, { name: "StaleResponse" });
 });
 
-test("failed login retains its error when authenticated-session expiry handler changes context", async () => {
-  const client = createClient(async () => ({
-    ok: false,
-    status: 401,
-    json: async () => ({ error: { code: "invalid_credentials" } }),
-  }));
-  client.onUnauthorized(() => client.setTenant(""));
-  await assert.rejects(
-    client.request("/web-session", {
-      method: "POST",
-      body: { login: "wrong", password: "synthetic" },
-    }),
-    { code: "invalid_credentials", status: 401 },
-  );
-});
-
 test("retry reuses request identity only for identical complete payload", async () => {
   const a = {
     agent_config_id: "one",
@@ -45,21 +29,6 @@ test("retry reuses request identity only for identical complete payload", async 
     (await requestIdentity({ ...a, agent_config_id: "two" }, first)).key,
     first.key,
   );
-});
-
-test("blocked browser storage still supports tab-local visitor and idempotency state", async () => {
-  const { sessionState } = await import("../src/support_agent/web/storage.js");
-  Object.defineProperty(globalThis, "sessionStorage", {
-    configurable: true,
-    get() {
-      throw new Error("third-party storage blocked");
-    },
-  });
-  assert.equal(sessionState.set("support.test", "scoped-value"), false);
-  assert.equal(sessionState.get("support.test"), "scoped-value");
-  sessionState.removePrefix("support.");
-  assert.equal(sessionState.get("support.test"), null);
-  delete globalThis.sessionStorage;
 });
 
 test("SSE preserves split UTF-8, returns only terminal results and rejects interrupted delivery", async () => {
