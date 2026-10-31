@@ -20,7 +20,8 @@ def main():
     parser = argparse.ArgumentParser(description="通用客服平台本地管理")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("create-admin")
-    commands.add_parser("preflight", help="只读检查部署配置和数据库")
+    checks = commands.add_parser("preflight", help="只读检查部署配置和数据库")
+    checks.add_argument("--production", action="store_true", help="应用严格生产要求；不会修改配置")
     rotation = commands.add_parser("rotate-keys", help="租户范围主密钥预览、检查、原子执行或恢复")
     rotation.add_argument("mode", choices=["preview", "check", "execute", "recover"])
     rotation.add_argument("--tenant", type=UUID, required=True)
@@ -38,7 +39,7 @@ def main():
         retention.add_argument("--" + field + "-days", type=int)
     args = parser.parse_args()
     if args.command == "preflight":
-        return preflight(parser)
+        return preflight(parser, production=args.production)
     if args.command != "create-admin":
         return maintenance(args, parser)
     try:
@@ -83,7 +84,7 @@ def main():
         engine.dispose()
 
 
-def preflight(parser):
+def preflight(parser, *, production=False):
     import json
 
     from support_agent.preflight import inspect
@@ -94,7 +95,7 @@ def preflight(parser):
     except (ValidationError, ValueError):
         parser.exit(1, "配置无效；请检查环境变量格式，详情不会显示以保护密钥。\n")
     try:
-        result = inspect(settings, engine)
+        result = inspect(settings, engine, production=production)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         if not result["ready"]:
             parser.exit(1)

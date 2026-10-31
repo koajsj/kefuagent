@@ -46,7 +46,9 @@ def response(request, context, conversation_id, data, *, public=False):
                     record_failure(db, work_request, exc.code)
             except SQLAlchemyError:
                 logging.getLogger("support_agent").error(
-                    "stream audit unavailable request_id=%s", context.request_id
+                    json.dumps(
+                        {"event": "stream_audit_unavailable", "request_id": str(context.request_id)}
+                    )
                 )
             return {"error_category": exc.code, "result_unknown": False}
         except Exception:

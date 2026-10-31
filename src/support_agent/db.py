@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from support_agent.config import Settings
 
+EXPECTED_REVISION = "0010_http_ingress"
+
 
 def build_database(settings: Settings):
     engine = create_engine(
@@ -28,11 +30,12 @@ def check_database(engine) -> None:
     with engine.connect() as connection:
         role = connection.execute(
             text(
-                "SELECT rolsuper,rolbypassrls,rolcreaterole FROM pg_roles WHERE rolname=current_user"
+                "SELECT rolsuper,rolbypassrls,rolcreaterole,rolcreatedb,rolreplication "
+                "FROM pg_roles WHERE rolname=current_user"
             )
         ).one()
         if any(role):
-            raise RuntimeError("HTTP database role must be NOSUPERUSER NOBYPASSRLS NOCREATEROLE")
+            raise RuntimeError("HTTP database role has unsafe administrative privileges")
         revision = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
-        if revision != "0010_http_ingress":
+        if revision != EXPECTED_REVISION:
             raise RuntimeError("Database revision is not supported; run alembic upgrade head")

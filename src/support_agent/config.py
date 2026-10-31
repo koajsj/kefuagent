@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -9,6 +10,7 @@ from sqlalchemy.exc import ArgumentError
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
     database_url: SecretStr
+    deployment_environment: Literal["development", "production"] = "development"
     migration_database_url: SecretStr | None = None
     http_limits_enabled: bool = False
     http_rate_key: SecretStr | None = Field(default=None, min_length=32, max_length=256)

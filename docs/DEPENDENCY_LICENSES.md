@@ -1,5 +1,8 @@
 # 安装依赖与许可证
 历史快照：2026-10-30 本机 Python 3.13.18 环境，包含当时的开发和测试依赖，并非当前锁文件清单。读取实际安装发行版元数据及列出的授权文件；这里不替代授权原文，打包分发必须保留完整许可证及第三方声明。未修改这些库。
+
+2026-10-31 对本项目 `.venv` 的发行版元数据核对：下表中的 httpcore2、httpx2、iniconfig、packaging、pluggy、Pygments、pytest、truststore 已不在当前环境，其余所列包及版本仍存在。实际分发应以目标环境安装的发行版及其许可证为准；本记录保留历史快照，不代表镜像已检查。
+
 | 包 | 版本 | 元数据授权 | 实际保留的授权文件 |
 | --- | --- | --- | --- |
 | alembic | 1.20.1 | MIT | alembic-1.20.1.dist-info/licenses/LICENSE |
@@ -51,4 +54,4 @@
 | typing_extensions | 4.16.0 | PSF-2.0 | typing_extensions-4.16.0.dist-info/licenses/LICENSE |
 | uvicorn | 0.54.0 | BSD-3-Clause | uvicorn-0.54.0.dist-info/licenses/LICENSE.md |
 
-psycopg/psycopg-binary 为 LGPL-3.0 系列，certifi 为 MPL-2.0；cryptography 为 Apache-2.0/BSD 双许可并包含底层库声明，lxml 及其二进制组件以包内各授权文本为准。没有静态链接、改库或制作二进制分发；未来分发包/镜像必须复查各依赖和附带组件的授权义务，不得删除上表文件。
+psycopg/psycopg-binary 为 LGPL-3.0 系列，certifi 为 MPL-2.0；cryptography 为 Apache-2.0/BSD 双许可并包含底层库声明，lxml 及其二进制组件以包内各授权文本为准。快照记录时没有静态链接、改库或制作二进制分发；分发包/镜像必须复查实际依赖和附带组件的授权义务，并保留适用的授权文件。

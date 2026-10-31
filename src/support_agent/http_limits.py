@@ -14,6 +14,7 @@ from starlette.responses import JSONResponse
 
 from support_agent.errors import AppError
 from support_agent.models import HttpBucket
+from support_agent.observability import request_id as request_id_context
 
 logger = logging.getLogger("support_agent")
 
@@ -85,16 +86,26 @@ class IngressMiddleware:
         self.app, self.sessions, self.settings, self.pending = app, sessions, settings, pending
 
     async def __call__(self, scope, receive, send):
-        path = scope.get("path", "")
-        if (
-            scope["type"] != "http"
-            or not self.settings.http_limits_enabled
-            or not path.startswith("/api/v1/")
-            or path.startswith("/api/v1/health")
-        ):
+        if scope["type"] != "http":
             return await self.app(scope, receive, send)
         state = scope.setdefault("state", {})
         state["request_id"] = uuid4()
+        trace = request_id_context.set(str(state["request_id"]))
+        try:
+            path = scope.get("path", "")
+            if (
+                not self.settings.http_limits_enabled
+                or not path.startswith("/api/v1/")
+                or (path == "/api/v1/health/live" and scope.get("method") == "GET")
+            ):
+                return await self.app(scope, receive, send)
+            return await self.admitted(scope, receive, send)
+        finally:
+            request_id_context.reset(trace)
+
+    async def admitted(self, scope, receive, send):
+        path = scope.get("path", "")
+        state = scope["state"]
         stream = path.endswith("/stream")
         category = (
             "sse"

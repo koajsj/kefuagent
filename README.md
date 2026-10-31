@@ -24,7 +24,7 @@
   <a href="#-documentation">Documentation</a>
 </p>
 
-<sub>v0.7.1 · P11 · Modular Monolith</sub>
+<sub>v0.7.1 · P12 · Modular Monolith</sub>
 
 </div>
 
@@ -139,7 +139,7 @@ uv run alembic upgrade head
 uv run python -m support_agent.cli create-admin
 
 # 启动服务
-uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8000 --no-access-log
+uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8000 --no-access-log --no-proxy-headers
 ```
 
 打开：
@@ -160,6 +160,16 @@ uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8
 5. 创建客服入口，体验访客对话、人工接管和运营分析。
 
 离线演示用于验证产品流程，不代表真实模型回答质量。公开访客会话还需要单独配置随机的 `PUBLIC_RATE_KEY`；第三方模型默认关闭，需由部署方明确配置主机白名单、预算和调用开关。
+
+### Production deployment
+
+生产部署须显式设置 `DEPLOYMENT_ENVIRONMENT=production`，启动前会强制执行生产预检。也可在不改变环境模式时执行 `uv run python -m support_agent.cli preflight --production` 做严格只读检查：错误返回退出码 1，警告和预检通过均不等于生产验收。HTTPS、入口保护、密钥、存储权限、数据库运行角色及管理员等要求见[生产部署检查清单](docs/PRODUCTION_CHECKLIST.md)；不要向 HTTP 进程注入迁移账户连接。
+
+容器默认关闭代理头解析。部署可信反向代理时，需覆盖容器启动命令，使用 `--proxy-headers --forwarded-allow-ips=实际代理IP`，只信任确定的代理 IP，不能使用 `*`；代理还须覆盖客户端传入的转发头。主机本地代理的 `127.0.0.1` 不一定是容器看到的代理地址，须按实际网络配置。参见[部署与恢复文档](docs/DEPLOYMENT.md)。
+
+默认以单实例部署为前提；多实例须共享同一私有文档存储、数据库、限流密钥和阈值。共享存储和多实例部署尚未完成验收。
+
+镜像中新建的文档目录权限为 `0700`；已有命名卷不会因此自动修改，部署方需核对卷内目录的所有者和权限，确保服务账号可访问且符合生产预检要求。
 
 ## 🔒 Security & Design Boundaries
 
@@ -189,12 +199,14 @@ uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8
 | --- | --- |
 | [Architecture](docs/ARCHITECTURE.md) | 架构、模块职责与设计决策 |
 | [Deployment & Recovery](docs/DEPLOYMENT.md) | 本机 / Linux 部署、升级、备份与恢复 |
+| [Production Checklist](docs/PRODUCTION_CHECKLIST.md) | 生产预检、配置与上线验收边界 |
 | [Operations & Security](docs/OPERATIONS.md) | 运行安全、凭证与数据保留 |
 | [P7 Quality](docs/P7_QUALITY.md) | 离线检索评估与指标口径 |
 | [P7 Runtime](docs/P7_RUNTIME.md) | SSE、密钥轮换、保留策略与 CI |
 | [P8 Acceptance](docs/P8_ACCEPTANCE.md) | 客服运营、会话记忆与分析验收 |
 | [P8 Compose](docs/P8_DEPLOYMENT.md) | 可选 Docker Compose 方案及限制 |
 | [P9 Quality Governance](docs/P9_ACCEPTANCE.md) | 测试精简、静态审查与验收记录 |
+| [P12 生产准备审查](docs/P12_READINESS.md) | 审查发现、修复与生产验收缺口 |
 | [P11 清理与边界](docs/P11_ACCEPTANCE.md) | 自动化测试移除、静态交付与未验收项 |
 | [Dependency Licenses](docs/DEPENDENCY_LICENSES.md) | 第三方依赖许可证 |
 
@@ -219,4 +231,4 @@ uv run uvicorn support_agent.main:create_app --factory --host 127.0.0.1 --port 8
 
 检索排序使用预计算 rank/coverage，运营统计下推 PostgreSQL，历史关联批量读取；SSE 按缓冲和时间重新验权后交付。知识库删除新增预览和有界批次，未完成时由界面“继续清理”，不自动无限重试。详情与离线证据见 [P10 验收与限制](docs/P10_ACCEPTANCE.md)。
 
-当前迁移 head 为 `0010_http_ingress`。仅本机新隔离 P10 库已获授权升级；已有 dev/test 未变，应用启动前需先经授权备份并升级目标库。总入口保护须显式设置 `HTTP_LIMITS_ENABLED=true` 和共享 `HTTP_RATE_KEY`（或复用 PUBLIC_RATE_KEY），阈值见 `.env.example`；关闭时 preflight 会提示。所有实例共享数据库、密钥与阈值，生产代理、容量和多实例部署仍需独立验收，不把本机检查当生产通过。
+当前迁移 head 为 `0010_http_ingress`。P10 阶段仅本机新隔离库获授权升级；应用启动前需先经授权备份并升级目标库。总入口保护须显式设置 `HTTP_LIMITS_ENABLED=true` 和共享 `HTTP_RATE_KEY`（或复用 PUBLIC_RATE_KEY），阈值见 `.env.example`；生产预检要求启用。所有实例共享数据库、密钥与阈值，生产代理、容量和多实例部署仍需独立验收，不把本机检查当生产通过。

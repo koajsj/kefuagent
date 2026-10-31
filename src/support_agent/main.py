@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
+from starlette.requests import ClientDisconnect
 
 from support_agent.api import (
     agents,
@@ -33,7 +34,6 @@ from support_agent.config import Settings
 from support_agent.db import build_database, check_database
 from support_agent.dependencies import Database
 from support_agent.errors import AppError
-from support_agent.observability import request_id as request_id_context
 from support_agent.providers import OpenAICompatibleProvider
 from support_agent.retrieval import PostgresFTSRetriever
 from support_agent.schemas import ErrorOut
@@ -53,10 +53,16 @@ def create_app(settings: Settings | None = None):
         # A missing or unsafe database is a startup failure, never silent SQLite fallback.
         try:
             await run_in_threadpool(check_database, engine)
+            if settings.deployment_environment == "production":
+                from support_agent.preflight import inspect
+
+                report = await run_in_threadpool(inspect, settings, engine)
+                if not report["ready"]:
+                    raise RuntimeError("Production preflight refused startup")
         except (SQLAlchemyError, RuntimeError):
             engine.dispose()
             raise RuntimeError(
-                "Database unavailable, unsafe role or pending migration; check local setup"
+                "Startup checks failed; run preflight with the same runtime configuration"
             ) from None
         try:
             yield
@@ -73,7 +79,7 @@ def create_app(settings: Settings | None = None):
         lifespan=lifespan,
         description="Tenant-scoped knowledge, verified-extract RAG and bounded, authorized read-only tool execution.",
         responses={
-            code: {"model": ErrorOut} for code in [401, 403, 404, 409, 413, 422, 429, 500, 503]
+            code: {"model": ErrorOut} for code in [401, 403, 404, 408, 409, 413, 422, 429, 500, 503]
         },
     )
     from support_agent.http_limits import IngressMiddleware
@@ -98,27 +104,43 @@ def create_app(settings: Settings | None = None):
     async def trace(request: Request, call_next):
         started = time.monotonic()
         request.state.request_id = getattr(request.state, "request_id", None) or uuid4()
-        request_id_context.set(str(request.state.request_id))
         upload_path = request.method == "POST" and re.fullmatch(
             r"/api/v1/knowledge-bases/[0-9a-fA-F-]{36}/documents", request.url.path
         )
         limit = 5 * 1024 * 1024 + 65536 if upload_path else 131072
         size = 0
         parts = []
-        async for chunk in request.stream():
-            size += len(chunk)
-            if size > limit:
-                return await error_response(
-                    request, 413, "request_too_large", "Request body exceeds the route size limit"
-                )
-            parts.append(chunk)
+        try:
+            # Bound the body phase as a whole, including clients sending tiny fragments forever.
+            async with asyncio.timeout(30):
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > limit:
+                        break
+                    parts.append(chunk)
+        except TimeoutError:
+            return await error_response(
+                request, 408, "request_body_timeout", "Request body timed out"
+            )
+        except ClientDisconnect:
+            return await error_response(
+                request, 400, "request_disconnected", "Request was disconnected"
+            )
+        if size > limit:
+            return await error_response(
+                request, 413, "request_too_large", "Request body exceeds the route size limit"
+            )
         # Starlette's cached Request body is reused by call_next; no second read or logging.
         request._body = b"".join(parts)
         try:
             response = await call_next(request)
         except Exception:
             # This boundary prevents ASGI server traceback logging of arbitrary exception values.
-            logger.error("unexpected error request_id=%s", request.state.request_id)
+            logger.error(
+                json.dumps(
+                    {"event": "unexpected_error", "request_id": str(request.state.request_id)}
+                )
+            )
             response = await error_response(
                 request, 500, "internal_error", "Unexpected server error"
             )
@@ -157,7 +179,14 @@ def create_app(settings: Settings | None = None):
                     with sessions.begin() as db:
                         record_failure(db, request, code)
                 except SQLAlchemyError:
-                    logger.error("audit unavailable request_id=%s", request.state.request_id)
+                    logger.error(
+                        json.dumps(
+                            {
+                                "event": "audit_unavailable",
+                                "request_id": str(request.state.request_id),
+                            }
+                        )
+                    )
 
             await run_in_threadpool(write_failure)
         return JSONResponse(
@@ -168,6 +197,8 @@ def create_app(settings: Settings | None = None):
             },
             headers={
                 "X-Request-ID": str(request.state.request_id),
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
                 **({"WWW-Authenticate": "Bearer"} if status == 401 else {}),
             },
         )
