@@ -604,3 +604,47 @@ class HttpBucket(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
+
+
+class UserMemoryConsent(Record, Timestamped, Base):
+    __tablename__ = "user_memory_consents"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id"],
+            ["tenant_memberships.tenant_id", "tenant_memberships.user_id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("version > 0", name="version"),
+    )
+    tenant_id: Mapped[UUID]
+    user_id: Mapped[UUID]
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+
+
+class UserMemory(Record, Timestamped, Base):
+    __tablename__ = "user_memories"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", "memory_key"),
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id"],
+            ["tenant_memberships.tenant_id", "tenant_memberships.user_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "source_conversation_id", "source_message_id"],
+            ["messages.tenant_id", "messages.conversation_id", "messages.id"],
+            ondelete="CASCADE",
+        ),
+        CheckConstraint("version > 0", name="version"),
+        Index("ix_user_memories_expiry", "tenant_id", "user_id", "expires_at"),
+    )
+    tenant_id: Mapped[UUID]
+    user_id: Mapped[UUID]
+    memory_key: Mapped[str] = mapped_column(String(80))
+    quote: Mapped[str] = mapped_column(String(300))
+    source_conversation_id: Mapped[UUID]
+    source_message_id: Mapped[UUID]
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

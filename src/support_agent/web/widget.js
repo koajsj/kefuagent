@@ -31,9 +31,10 @@
   });
   const frame = document.createElement("iframe");
   frame.title = "在线客服";
-  frame.src = origin + "/chat/" + id;
+  const chatUrl = origin + "/chat/" + id;
+  frame.src = "about:blank";
   frame.hidden = true;
-  frame.setAttribute("sandbox", "allow-scripts allow-same-origin");
+  frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
   frame.referrerPolicy = "no-referrer";
   Object.assign(frame.style, {
     width: "min(420px, calc(100vw - 40px))",
@@ -47,6 +48,8 @@
   });
   toggle.addEventListener("click", () => {
     frame.hidden = !frame.hidden;
+    // Unloading the frame stops polling and client work; a tab-scoped visitor can resume.
+    frame.src = frame.hidden ? "about:blank" : chatUrl;
     frame.style.display = frame.hidden ? "none" : "block";
     toggle.setAttribute("aria-expanded", String(!frame.hidden));
     toggle.textContent = frame.hidden ? "在线客服" : "关闭客服";

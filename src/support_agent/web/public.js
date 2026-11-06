@@ -19,7 +19,10 @@ let info,
   pending,
   offset = 0,
   historyEpoch = 0,
-  runtimeEpoch = 0;
+  runtimeEpoch = 0,
+  pollTimer, pollController, pollGeneration = 0, pollFailures = 0, pollInFlight = false,
+  latestId = null, pageStopped = false, conversationClosed = false;
+const displayedIds = new Set();
 const key = "support.visitor." + pid;
 const feedback = el("div"),
   ratingArea = el("section", {class:"public-rating"}),
@@ -49,6 +52,7 @@ async function api(path = "", options = {}) {
       method: options.method || "GET",
       credentials: "omit",
       cache: "no-store",
+      signal: options.signal,
       headers: {
         ...(requestSession ? { Authorization: "Visitor " + requestSession.token } : {}),
         ...(options.body ? { "Content-Type": "application/json" } : {}),
@@ -70,7 +74,14 @@ async function api(path = "", options = {}) {
         explain(result?.error?.code) || "客服暂时不可用，请稍后再试。",
       );
       err.code = result?.error?.code;
+      err.status = response.status;
       throw err;
+    }
+    if (response.headers.get("X-Conversation-Status") === "closed") {
+      conversationClosed = true;
+      clearTimeout(pollTimer);
+      send.disabled = true;
+      runs.textContent = "会话已结束，可查看历史或重新开始。";
     }
     return result;
   } catch (error) {
@@ -79,7 +90,7 @@ async function api(path = "", options = {}) {
   }
 }
 function showError(error) {
-  if (error.name === "StaleResponse") return;
+  if (["StaleResponse", "AbortError"].includes(error.name)) return;
   if (error.code === "visitor_authentication_required") {
     session = null;
     pending = null;
@@ -98,16 +109,28 @@ function showError(error) {
 function save() {
   sessionState.set(key, JSON.stringify({ session, pending }));
 }
-async function loadHistory(next = 0) {
+const newMessages = button("有新消息，查看最新", () => loadHistory(0).catch(showError));
+newMessages.hidden = true;
+async function loadHistory(next = 0, options = {}) {
   const ticket = ++historyEpoch;
+  const generation = pollGeneration;
+  offset = next;
   const rows = await api(
     `/sessions/${session.id}/messages?limit=50&offset=${next}`,
+    options,
   );
-  if (ticket !== historyEpoch) return;
+  if (ticket !== historyEpoch || generation !== pollGeneration || document.hidden || pageStopped) return;
   offset = next;
-  thread.replaceChildren(
-    ...rows.map((m) =>
-      el(
+  if (next === 0) { latestId = rows.at(-1)?.id || null; newMessages.hidden = true; }
+  displayedIds.clear();
+  rows.forEach(m => displayedIds.add(m.id));
+  thread.replaceChildren(...rows.map(renderMessage));
+  if (!rows.length) thread.append(message("请发送您的问题。"));
+  older.disabled = rows.length < 50;
+  if (next === 0) thread.scrollTop = thread.scrollHeight;
+}
+function renderMessage(m) {
+  return el(
         "article",
         { class: "message " + m.role },
         el(
@@ -141,12 +164,7 @@ async function loadHistory(next = 0) {
               ),
             )
           : null,
-      ),
-    ),
-  );
-  if (!rows.length) thread.append(message("请发送您的问题。"));
-  older.disabled = rows.length < 50;
-  if (next === 0) thread.scrollTop = thread.scrollHeight;
+      );
 }
 async function loadRating() {
   if (!session) return;
@@ -192,10 +210,69 @@ async function start() {
     await loadRating();
   } finally {
     busy = false;
+    send.disabled = conversationClosed;
   }
 }
 
+function schedulePoll(delay = 5000) {
+  clearTimeout(pollTimer);
+  if (session && !conversationClosed && !document.hidden && !pageStopped) pollTimer = setTimeout(poll, delay);
+}
+async function poll() {
+  if (!session || conversationClosed || document.hidden || pageStopped || pollInFlight) return;
+  const generation = pollGeneration;
+  const controller = new AbortController();
+  pollController = controller;
+  pollInFlight = true;
+  try {
+    if (!latestId) { if (!busy && offset === 0) await loadHistory(0, {signal:controller.signal}); }
+    else {
+      const anchor = latestId, pageEpoch = historyEpoch;
+      const rows = await api(`/sessions/${session.id}/messages?limit=100&after=${encodeURIComponent(anchor)}`, {signal:controller.signal});
+      if (generation !== pollGeneration) return;
+      if (historyEpoch === pageEpoch && latestId === anchor && rows.length) {
+        latestId = rows.at(-1).id;
+        if (offset === 0) {
+          if (!displayedIds.size) thread.replaceChildren();
+          for (const row of rows) if (!displayedIds.has(row.id)) { displayedIds.add(row.id); thread.append(renderMessage(row)); }
+        } else newMessages.hidden = false;
+      }
+      if (conversationClosed && offset === 0) await loadHistory(0, {signal:controller.signal});
+    }
+    pollFailures = 0;
+  } catch (error) {
+    if (generation === pollGeneration && !['StaleResponse', 'AbortError'].includes(error.name)) {
+      if (['visitor_authentication_required', 'conversation_closed', 'publication_revoked', 'visitor_access_revoked'].includes(error.code) || [401, 403, 404, 410].includes(error.status)) {
+        session = null; pending = null; sessionState.remove(key); render();
+        showError(error); return;
+      }
+      pollFailures = Math.min(pollFailures + 1, 4);
+    }
+  } finally {
+    pollInFlight = false;
+    if (pollController === controller) pollController = null;
+    if (session) schedulePoll(generation === pollGeneration ? Math.min(60000, 5000 * 2 ** pollFailures) : 5000);
+  }
+}
+function resumePolling() {
+  if (!session || conversationClosed || document.hidden || pageStopped) return;
+  loadHistory(offset).catch(showError);
+  schedulePoll();
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { ++pollGeneration; ++historyEpoch; clearTimeout(pollTimer); pollController?.abort(); }
+  else resumePolling();
+});
+window.addEventListener('pagehide', () => { pageStopped = true; ++pollGeneration; ++historyEpoch; clearTimeout(pollTimer); pollController?.abort(); });
+window.addEventListener('pageshow', () => { pageStopped = false; resumePolling(); });
 function render() {
+  ++pollGeneration;
+  ++historyEpoch;
+  pollController?.abort();
+  conversationClosed = false;
+  send.disabled = busy;
+  latestId = null;
+  schedulePoll();
   const startButton = button(
     "开始会话",
     () => start().catch(showError),
@@ -209,7 +286,7 @@ function render() {
   );
   composer.addEventListener("submit", async (e) => {
     e.preventDefault();
-    if (busy || !session) return;
+    if (busy || !session || conversationClosed) return;
     const content = body.value.trim();
     if (!content) return;
     busy = true;
@@ -231,7 +308,7 @@ function render() {
       });
       if (result.status !== "running") {
         pending = null;
-        body.value = "";
+        if (body.value.trim() === content) body.value = "";
         save();
       }
       feedback.replaceChildren(
@@ -253,7 +330,7 @@ function render() {
       showError(error);
     } finally {
       busy = false;
-      send.disabled = false;
+      send.disabled = conversationClosed;
     }
   });
   root.replaceChildren(
@@ -296,6 +373,7 @@ function render() {
             }),
           ),
           thread,
+          newMessages,
           runs,
           composer,
           ratingArea,

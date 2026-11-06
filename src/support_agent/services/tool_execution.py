@@ -209,6 +209,9 @@ def check_authorization(
 
 
 def ensure_delivery(db, context, call, rows, request):
+    from support_agent.services import user_memory
+
+    user_memory.ensure_delivery(db, context, call, lock=True)
     # Flattened server-owned provenance survives later turns that paraphrase earlier tool answers.
     dependencies = (call.result or {}).get("tool_dependencies", [])
     linked = (

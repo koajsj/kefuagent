@@ -13,12 +13,8 @@ export function operationFilters(operators, apply) {
 }
 export async function operationsPanel(ctx, conversation, operators, isCurrent, refresh) {
   const cid = conversation.id;
-  const [history, summary] = await Promise.all([
-    ctx.api(`/conversations/${cid}/collaboration?limit=30&offset=0`),
-    ctx.api(`/conversations/${cid}/summary`),
-  ]);
-  if (!isCurrent()) return el('div');
-  const editable = ctx.role === 'admin' || conversation.assignee_id === ctx.user.id;
+  const editable = (ctx.role === 'admin' || conversation.assignee_id === ctx.user.id) && (ctx.role !== 'admin' || operators !== null);
+  operators = operators || [];
   const fields = [
     label('优先级', select('priority', priorities, conversation.priority, {disabled:!editable})),
     label('标签（逗号分隔）', input('tags', (conversation.tags || []).join(', '), {disabled:!editable})),
@@ -38,12 +34,45 @@ export async function operationsPanel(ctx, conversation, operators, isCurrent, r
       throw error;
     }
     if (isCurrent()) await refresh();
-  }, '保存运营信息') : el('div', {}, ...fields, message('只有负责人或管理员可修改运营信息。'));
-  const notes = el('div', {}, ...history.map(h => el('article', {class:'collaboration-entry'}, el('strong', {}, h.kind), el('small', {}, ' · ' + date(h.created_at)), h.actor_id ? el('small', {}, ' · ' + (operators.find(o => o.id === h.actor_id)?.display_name || h.actor_id)) : null, h.content ? el('p', {}, h.content) : null, h.details && Object.keys(h.details).length ? el('pre', {}, JSON.stringify(h.details, null, 2)) : null)));
-  if (!history.length) notes.append(empty('暂无协作记录。'));
+  }, '保存运营信息') : el('div', {}, ...fields, message(ctx.role === 'admin' ? '负责人列表暂不可用，加载成功后请重新打开会话。' : '只有负责人或管理员可修改运营信息。'));
+  const notes = el('div', {'aria-live':'polite'}, message('正在加载协作记录…'));
+  const summaryArea = el('div', {'aria-live':'polite'}, message('正在加载摘要…'));
+  let firstNotes = true;
+  const seen = new Set();
+  let lastId = null, loading = false;
+  const more = button('加载更早记录', loadNotes);
+  async function loadNotes() {
+    if (loading || !isCurrent()) return;
+    loading = true; more.disabled = true;
+    try {
+      const params = new URLSearchParams({limit:'30'});
+      if (lastId) params.set('before', lastId);
+      const rows = await ctx.api(`/conversations/${cid}/collaboration?${params}`);
+      if (!isCurrent()) return;
+      notes.querySelector('.note-error')?.remove();
+      if (firstNotes) { notes.replaceChildren(); firstNotes = false; }
+      for (const h of rows) {
+        if (seen.has(h.id)) continue;
+        seen.add(h.id); lastId = h.id;
+        notes.append(el('article', {class:'collaboration-entry'}, el('strong', {}, h.kind), el('small', {}, ' · ' + date(h.created_at)), h.actor_id ? el('small', {}, ' · ' + (operators.find(o => o.id === h.actor_id)?.display_name || h.actor_id)) : null, h.content ? el('p', {}, h.content) : null, h.details && Object.keys(h.details).length ? el('pre', {}, JSON.stringify(h.details, null, 2)) : null));
+      }
+      if (!seen.size) notes.append(empty('暂无协作记录。'));
+      more.hidden = rows.length < 30;
+    } catch (error) {
+      if (isCurrent()) { if (firstNotes) notes.replaceChildren(); notes.querySelector('.note-error')?.remove(); notes.append(el('div', {class:'note-error'}, message(error.message, 'error'), button('重试', () => loadNotes()))); }
+    } finally { loading = false; more.disabled = false; }
+  }
+  async function loadSummary() {
+    try {
+      const summary = await ctx.api(`/conversations/${cid}/summary`);
+      if (!isCurrent()) return;
+      summaryArea.replaceChildren(summary ? el('div', {}, el('ul', {}, ...JSON.parse(summary.content).map(item => el('li', {}, item.quote))), el('small', {}, `来源：${summary.source_start_id} 至 ${summary.source_end_id}`), el('small', {}, `版本 ${summary.version} · ${summary.source_count} 条来源消息 · ${date(summary.created_at)}`)) : empty('尚无摘要。'));
+    } catch (error) { if (isCurrent()) summaryArea.replaceChildren(message(error.message, 'error'), button('重试', loadSummary)); }
+  }
   const noteForm = form([label('内部备注', el('textarea', {name:'content', required:true, maxLength:4000, rows:3}))], async v => {
     await ctx.api(`/conversations/${cid}/collaboration`, {method:'POST',body:{content:v.get('content')}});
     if (isCurrent()) await refresh();
   }, '添加内部备注');
-  return el('div', {class:'operations'}, panel('运营信息', info, settings), panel('协作记录', notes, noteForm), panel('会话摘要（只读）', summary ? el('div', {}, el('ul', {}, ...JSON.parse(summary.content).map(item => el('li', {}, item.quote))), el('small', {}, `来源：${summary.source_start_id} 至 ${summary.source_end_id}`), el('small', {}, `版本 ${summary.version} · ${summary.source_count} 条来源消息 · ${date(summary.created_at)}`)) : empty('尚无摘要。')));
+  loadNotes(); loadSummary();
+  return el('div', {class:'operations'}, panel('运营信息', info, settings), panel('协作记录', notes, more, noteForm), panel('会话摘要（只读）', summaryArea));
 }

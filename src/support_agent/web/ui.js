@@ -196,12 +196,15 @@ export function pager(offset, count, limit, onPage) {
 export async function collection(api, path, cap = 500) {
   const items = [];
   for (let offset = 0; offset < cap; offset += 100) {
+    const limit = Math.min(100, cap - offset);
     const page = await api(
-      `${path}${path.includes("?") ? "&" : "?"}limit=100&offset=${offset}`,
+      `${path}${path.includes("?") ? "&" : "?"}limit=${limit}&offset=${offset}`,
     );
     items.push(...page);
-    if (page.length < 100) return items;
+    if (page.length < limit) return items;
   }
+  const extra = await api(`${path}${path.includes("?") ? "&" : "?"}limit=1&offset=${cap}`);
+  if (!extra.length) return items;
   throw new Error(
     "选项超过 500 条，请通过 API 分页管理，工作台未截断后代为保存。",
   );

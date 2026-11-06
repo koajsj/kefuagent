@@ -1,3 +1,11 @@
+FROM node:22-slim AS frontend
+WORKDIR /web
+COPY frontend/package.json frontend/package-lock.json ./frontend/
+RUN cd frontend && npm ci --no-fund --no-audit
+COPY frontend ./frontend
+COPY src/support_agent/web/widget.js ./src/support_agent/web/widget.js
+RUN cd frontend && npm run build
+
 FROM ghcr.io/astral-sh/uv:0.13.6 AS uv
 FROM python:3.12-slim
 COPY --from=uv /uv /usr/local/bin/uv
@@ -5,6 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH"
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
+COPY --from=frontend /web/src/support_agent/web-react ./src/support_agent/web-react
 COPY migrations ./migrations
 COPY alembic.ini ./
 RUN uv sync --locked --no-dev --no-editable && useradd --system --uid 10001 --create-home app \

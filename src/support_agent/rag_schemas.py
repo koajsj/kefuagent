@@ -72,7 +72,9 @@ class SearchHit(Output):
     page: int | None
     section: str | None
     generation: int
-    strategy: Literal["postgres_fts", "postgres_fts_cjk", "postgres_rrf"] = "postgres_fts"
+    strategy: Literal[
+        "postgres_fts", "postgres_fts_cjk", "postgres_rrf", "postgres_han_bounded"
+    ] = "postgres_fts"
 
 
 class KnowledgeBindings(Input):
@@ -111,13 +113,23 @@ class Citation(Output):
     section: str | None
 
 
+class AnswerClaim(Input):
+    statement: str = Field(min_length=1, max_length=600)
+    kind: Literal["fact", "inference", "uncertain"]
+    chunk_ids: list[UUID] = Field(min_length=1, max_length=3)
+
+
 class ChatOut(Output):
     answer: str
     citations: list[Citation]
     grounded: bool = Field(
         description="Only current source membership and verbatim extracts are verified; source truth and semantic sufficiency are not proven"
     )
-    grounding_mode: Literal["verified_extracts"] = "verified_extracts"
+    grounding_mode: Literal["verified_extracts", "evidence_synthesis_unverified"] = (
+        "verified_extracts"
+    )
+    claims: list[AnswerClaim] = Field(default_factory=list)
+    semantic_verified: Literal[False] = False
     status: Literal["answered", "unresolved", "failed", "running"]
     conversation_id: UUID
     call_id: UUID

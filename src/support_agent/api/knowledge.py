@@ -17,6 +17,7 @@ from support_agent.rag_schemas import (
     SearchHit,
     SearchInput,
 )
+from support_agent.search_text import HAN, latin_expression, query_expression, query_groups
 from support_agent.services import knowledge
 from support_agent.services.resources import get_owned, list_owned
 
@@ -163,6 +164,18 @@ def search(
     db: Database,
     context: TenantContext,
 ):
+    groups = query_groups(data.query)
+    if (
+        not HAN.fullmatch(data.query.strip())
+        and not query_expression(groups)
+        and not latin_expression(groups)
+    ):
+        raise AppError(
+            422,
+            "unsupported_query",
+            "No searchable terms. Use Chinese characters or an English keyword; "
+            "this is not a statement that the knowledge base contains no answer.",
+        )
     return request.app.state.retriever.search(
         db, context, [knowledge_base_id], data.query, data.limit
     )

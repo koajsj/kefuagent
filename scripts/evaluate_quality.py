@@ -13,7 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from support_agent.config import Settings
 from support_agent.db import build_database, check_database, set_tenant
 from support_agent.errors import AppError, forbidden
-from support_agent.evaluation import markdown, ranking_metrics, summarize
+from support_agent.evaluation import lexical_baseline, markdown, ranking_metrics, summarize
 from support_agent.models import Document, Membership, Tenant, User
 from support_agent.retrieval import PostgresFTSRetriever
 from support_agent.tool_protocol import ExecutionContext
@@ -108,18 +108,35 @@ def evaluate(settings, tenant_id, user_id, dataset, manifest):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tenant-id", type=UUID, required=True)
-    parser.add_argument(
-        "--user-id", type=UUID, required=True, help="Existing active member; operator CLI"
-    )
-    parser.add_argument(
-        "--manifest", type=Path, required=True, help="Case IDs mapped to existing KB/docs"
-    )
+    parser.add_argument("--tenant-id", type=UUID)
+    parser.add_argument("--user-id", type=UUID, help="Existing active member; operator CLI")
+    parser.add_argument("--manifest", type=Path, help="Case IDs mapped to existing KB/docs")
     parser.add_argument("--dataset", type=Path, default=Path("data/customer_quality.json"))
     parser.add_argument("--compare", type=Path, help="Compare reports from identical dataset/scope")
     parser.add_argument("--output", type=Path, default=Path(".local/evaluations"))
+    parser.add_argument(
+        "--lexical-only",
+        action="store_true",
+        help="Inspect literal dataset fixtures only; no database or model, no ranking metrics",
+    )
     args = parser.parse_args()
     dataset_bytes = args.dataset.read_bytes()
+    if args.lexical_only:
+        report = lexical_baseline(json.loads(dataset_bytes))
+        report["dataset_sha256"] = hashlib.sha256(dataset_bytes).hexdigest()
+        # No operator scope exists in this fixture-only mode.
+        args.output.mkdir(parents=True, exist_ok=True)
+        target = args.output / f"quality-lexical-{uuid4().hex}.json"
+        with target.open("x") as stream:
+            json.dump(report, stream, ensure_ascii=False, indent=2)
+        previous = json.loads(args.compare.read_text()) if args.compare else None
+        with target.with_suffix(".md").open("x") as stream:
+            stream.write(markdown(report, previous))
+        print("Fixture lexical diagnostic:", target.resolve())
+        print("PostgreSQL ranking, answer and Agent quality: NOT_RUN")
+        return
+    if args.tenant_id is None or args.user_id is None or args.manifest is None:
+        parser.error("Database retrieval requires --tenant-id, --user-id and --manifest")
     manifest = json.loads(args.manifest.read_text())
     try:
         report = evaluate(

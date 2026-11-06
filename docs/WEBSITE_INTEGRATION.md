@@ -49,3 +49,7 @@ document.querySelectorAll("[data-support-widget-origin][data-support-widget-agen
 - 在实际站点加载脚本，确认按钮可打开和关闭客服 iframe。
 - 在文档 body 创建前以及重复加载同一脚本时，确认只出现一个实例；移除宿主后重新加载，确认可以重新出现。
 - 检查站点 CSP、Vue 或 React 的卸载流程及 WordPress 内容过滤；验证受支持浏览器中的公开会话和独立链接。
+
+## 静态 Demo 的区别
+
+GitHub Pages 产物使用 `/kefuagent/#/chat/公开入口UUID`，演示 Widget 的地址为 `/kefuagent/widget.js`；请复制 Demo 界面自动生成的代码。正式服务继续使用 `/chat/UUID` 和 `/widget.js`，由服务端可信 WEB_ORIGIN 生成地址。两者不可互换；Pages 仅演示虚构交互，不应承接真实客户。

@@ -1,11 +1,13 @@
 # 本机快速开始
 
-适用于全新、独立的 macOS 开发环境，需要 Python 3.11–3.14、PostgreSQL 15+ 和 [uv](https://docs.astral.sh/uv/)；本机脚本默认使用 Homebrew PostgreSQL 17。Linux、已有数据库和生产环境请先阅读[部署与恢复](DEPLOYMENT.md)。
+适用于全新、独立的 macOS 开发环境，需要 Python 3.11–3.14、PostgreSQL 15+、Node 22.12+（构建前端）和 [uv](https://docs.astral.sh/uv/)；本机脚本默认使用 Homebrew PostgreSQL 17。Linux、已有数据库和生产环境请先阅读[部署与恢复](DEPLOYMENT.md)。
 
 ```bash
 git clone https://github.com/koajsj/kefuagent.git
 cd kefuagent
 uv sync --locked
+npm ci --prefix frontend
+npm run build --prefix frontend
 
 # 在交互终端中按提示配置；首次迁移和建管理员前可能返回退出码 1
 uv run python -m support_agent.cli setup --configure

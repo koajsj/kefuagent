@@ -1,0 +1,35 @@
+{
+  "name": "kefuagent-web",
+  "private": true,
+  "version": "0.7.1",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "dev:demo": "vite --mode demo --host 127.0.0.1",
+    "check": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "build:demo": "tsc --noEmit && vite build --mode demo",
+    "preview:demo": "vite preview --mode demo --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@heroui/react": "3.2.7",
+    "@heroui/styles": "3.2.7",
+    "lucide-react": "1.69.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-router-dom": "7.18.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.4",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "5.2.0",
+    "tailwindcss": "4.3.4",
+    "typescript": "5.9.3",
+    "vite": "7.3.7"
+  }
+}

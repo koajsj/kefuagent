@@ -28,6 +28,11 @@ let user = null,
   tenants = [],
   epoch = 0,
   noticeTimer;
+let pageDisposers = [];
+function disposePage() {
+  for (const dispose of pageDisposers) dispose();
+  pageDisposers = [];
+}
 const pages = {
   onboarding: ["使用向导", onboardingPage],
   dashboard: ["工作区概览", dashboardPage],
@@ -50,6 +55,7 @@ function notify(text) {
 }
 function loggedOut() {
   epoch++;
+  disposePage();
   client.setTenant("");
   user = null;
   tenant = "";
@@ -84,6 +90,7 @@ function navigation() {
   }
 }
 async function chooseTenant(id) {
+  disposePage();
   client.setTenant(id);
   tenant = id;
   role = "";
@@ -145,6 +152,7 @@ async function signedIn(preferredTenant = tenant) {
 async function render() {
   if (!user) return;
   const current = ++epoch;
+  disposePage();
   client.setTenant(tenant);
   const key = location.hash.slice(1) || "chat";
   for (const link of document.querySelectorAll("#navigation a")) {
@@ -187,6 +195,10 @@ async function render() {
     view,
     notify,
     isCurrent: () => current === epoch,
+    onDispose: (dispose) => {
+      if (current === epoch) pageDisposers.push(dispose);
+      else dispose();
+    },
     api: (path, options) => {
       if (current !== epoch) throw new StaleResponse();
       return client.request(path, options);

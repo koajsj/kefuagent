@@ -6,6 +6,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
+from support_agent.services.costs import ModelPrice
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
@@ -54,6 +56,16 @@ class Settings(BaseSettings):
     retention_audit_days: int | None = Field(default=None, ge=30, le=36500)
     document_storage_root: Path = Path(".local/documents")
     model_allowed_hosts: list[str] = Field(default_factory=list)
+    model_prices: list[ModelPrice] = Field(default_factory=list, max_length=100)
+
+    @field_validator("model_prices")
+    @classmethod
+    def distinct_prices(cls, values):
+        identities = {(p.provider, p.model, p.endpoint, p.effective_at) for p in values}
+        if len(identities) != len(values):
+            raise ValueError("Duplicate effective model prices")
+        return values
+
     tenant_requests_per_minute: int = Field(default=120, ge=1, le=10000)
     user_requests_per_minute: int = Field(default=60, ge=1, le=10000)
     agent_requests_per_minute: int = Field(default=90, ge=1, le=10000)

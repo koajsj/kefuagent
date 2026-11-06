@@ -2,9 +2,16 @@ import re
 
 from sqlalchemy import func, select
 
+from support_agent.errors import AppError
 from support_agent.models import Document, DocumentChunk, KnowledgeBase
 from support_agent.rag_schemas import SearchHit
-from support_agent.search_text import coverage, latin_expression, query_expression, query_groups
+from support_agent.search_text import (
+    HAN,
+    coverage,
+    latin_expression,
+    query_expression,
+    query_groups,
+)
 from support_agent.services.knowledge import active_base
 
 _INJECTION = re.compile(
@@ -26,6 +33,8 @@ class PostgresFTSRetriever:
     def search(self, db, context, knowledge_base_ids, query, limit=6):
         for kid in knowledge_base_ids:
             active_base(db, context, kid)
+        if HAN.fullmatch(query.strip()):
+            return self._single_han(db, context, knowledge_base_ids, query.strip(), limit)
         groups = query_groups(query)
         lanes = [
             (DocumentChunk.chinese_vector, query_expression(groups)),
@@ -106,6 +115,89 @@ class PostgresFTSRetriever:
                 strategy="postgres_rrf",
             )
             for cid in ordered
+        ]
+
+    def _single_han(self, db, context, knowledge_base_ids, character, limit):
+        if not 1 <= limit <= 10:
+            raise AppError(422, "unsupported_query", "Single-character search limit must be 1–10")
+        scope = (
+            select(DocumentChunk.id)
+            .join(
+                Document,
+                (Document.tenant_id == DocumentChunk.tenant_id)
+                & (Document.id == DocumentChunk.document_id),
+            )
+            .join(
+                KnowledgeBase,
+                (KnowledgeBase.tenant_id == Document.tenant_id)
+                & (KnowledgeBase.id == Document.knowledge_base_id),
+            )
+            .where(
+                DocumentChunk.tenant_id == context.tenant_id,
+                Document.tenant_id == context.tenant_id,
+                KnowledgeBase.tenant_id == context.tenant_id,
+                Document.knowledge_base_id.in_(knowledge_base_ids),
+                Document.status == "ready",
+                KnowledgeBase.status == "active",
+                DocumentChunk.generation == Document.generation,
+            )
+            .limit(1001)
+        )
+        with db.begin_nested():
+            previous_timeout = db.scalar(select(func.current_setting("statement_timeout")))
+            db.execute(select(func.set_config("statement_timeout", "1000ms", True)))
+            ids = list(db.scalars(scope))
+            if len(ids) > 1000:
+                raise AppError(
+                    422, "query_too_broad", "Single-character search scope exceeds 1000 chunks"
+                )
+            rows = db.execute(
+                select(DocumentChunk, Document.filename)
+                .join(
+                    Document,
+                    (Document.tenant_id == DocumentChunk.tenant_id)
+                    & (Document.id == DocumentChunk.document_id),
+                )
+                .join(
+                    KnowledgeBase,
+                    (KnowledgeBase.tenant_id == Document.tenant_id)
+                    & (KnowledgeBase.id == Document.knowledge_base_id),
+                )
+                .where(
+                    DocumentChunk.tenant_id == context.tenant_id,
+                    Document.tenant_id == context.tenant_id,
+                    KnowledgeBase.tenant_id == context.tenant_id,
+                    Document.knowledge_base_id.in_(knowledge_base_ids),
+                    Document.status == "ready",
+                    KnowledgeBase.status == "active",
+                    DocumentChunk.generation == Document.generation,
+                    DocumentChunk.id.in_(ids),
+                    DocumentChunk.content.like(f"%{character}%"),
+                )
+                .order_by(DocumentChunk.document_id, DocumentChunk.position)
+                .limit(61)
+            ).all()
+            if len(rows) > 60:
+                raise AppError(
+                    422, "query_too_broad", "Single-character search matches more than 60 chunks"
+                )
+            db.execute(select(func.set_config("statement_timeout", previous_timeout, True)))
+        return [
+            SearchHit(
+                document_id=chunk.document_id,
+                document_name=name,
+                chunk_id=chunk.id,
+                content=chunk.content,
+                score=1 / (60 + rank),
+                page=chunk.page,
+                section=chunk.section,
+                generation=chunk.generation,
+                strategy="postgres_han_bounded",
+            )
+            for rank, (chunk, name) in enumerate(
+                ((chunk, name) for chunk, name in rows if reference_is_safe(chunk.content)), 1
+            )
+            if rank <= limit
         ]
 
     def current_chunks(self, db, context, chunk_ids, *, lock=False):

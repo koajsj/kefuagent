@@ -12,6 +12,7 @@ from support_agent.errors import AppError
 from support_agent.models import AgentConfig, ModelCall, ModelCredential
 from support_agent.providers import ProviderFailure
 from support_agent.schemas import ModelTarget, RuntimeConfig
+from support_agent.services import costs, user_memory
 from support_agent.services.model_configs import resolve_config
 from support_agent.services.resources import get_owned
 from support_agent.stream_events import notify
@@ -27,18 +28,16 @@ def select_target(config, task, require_tools):
     )
     selected = getattr(runtime.routing, task, None) or primary
     if require_tools and not selected.supports_tools:
-        candidate = runtime.routing.reasoning or runtime.routing.fallback
-        if candidate and candidate.supports_tools:
-            return candidate, "capability:tools", runtime
+        for candidate in (runtime.routing.reasoning, runtime.routing.fallback):
+            if candidate and candidate.supports_tools:
+                return candidate, "capability:tools", runtime
     return selected, "task:" + task, runtime
 
 
 def infer_task(content, *, tools=False):
-    if (
-        tools
-        or len(content) > 800
-        or any(word in content for word in ("比较", "分析", "结合", "多步"))
-    ):
+    # A lightweight text heuristic, not semantic classification; tool availability
+    # is checked separately by select_target. Keep tools for caller compatibility.
+    if len(content) > 800 or any(word in content for word in ("比较", "分析", "结合", "多步")):
         return "reasoning"
     if any(word in content for word in ("提取", "识别", "列出")):
         return "extraction"
@@ -55,6 +54,10 @@ def aggregate(call):
 
 
 def delivery_error(db, context, call):
+    try:
+        user_memory.ensure_delivery(db, context, call, lock=True)
+    except AppError as exc:
+        return exc.code
     config = get_owned(db, AgentConfig, context, call.agent_config_id, lock=True)
     if not config.enabled or config.version != call.config_version:
         return "credential_or_configuration_changed"
@@ -99,6 +102,7 @@ def complete(
         try:
             context = resume_context(db, context, request)
             call = get_owned(db, ModelCall, context, call_id, lock=True)
+            user_memory.ensure_delivery(db, context, call, lock=True)
             config = get_owned(db, AgentConfig, context, call.agent_config_id, refresh=True)
             if (
                 call.status != "running"
@@ -150,6 +154,13 @@ def complete(
                     else {}
                 ),
             }
+            step["pricing"] = costs.snapshot(
+                request.app.state.settings,
+                config.provider,
+                target.model,
+                kwargs["base_url"],
+                datetime.fromisoformat(step["started_at"]),
+            )
             call.steps = [*call.steps, step]
             step_index = len(call.steps) - 1
             db.commit()

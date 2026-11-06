@@ -1,5 +1,5 @@
 # Include this file from the nginx http {} context, not from server {}.
-# Replace the domain and certificate paths. Thresholds are examples: size and
+# Replace every occurrence of the domain and the certificate paths. Thresholds are examples: size and
 # tune them for the deployment, then verify with representative traffic.
 # Nginx directly faces clients; if a trusted proxy precedes it, configure and
 # audit real-IP handling for known immediate peers before using $binary_remote_addr.
@@ -13,12 +13,14 @@ limit_conn_zone $binary_remote_addr zone=support_connections:10m;
 server {
     listen 80;
     server_name support.example.com;
+    if ($host != support.example.com) { return 444; }
     return 308 https://support.example.com$request_uri;
 }
 
 server {
     listen 443 ssl;
     server_name support.example.com;
+    if ($host != support.example.com) { return 444; }
     ssl_certificate /etc/ssl/support.example.com/fullchain.pem;
     ssl_certificate_key /etc/ssl/support.example.com/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -43,10 +45,10 @@ server {
         # No trailing slash: preserve /api paths and all other request URIs.
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        proxy_set_header Host support.example.com;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Host support.example.com;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header Forwarded "";
         proxy_set_header Connection "";

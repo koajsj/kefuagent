@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 
 from support_agent.errors import AppError, forbidden
 from support_agent.models import Collaboration, Conversation, Membership, User
@@ -153,12 +153,24 @@ def update(db, context, cid, data, request):
     return row
 
 
-def notes(db, context, cid, limit, offset):
+def notes(db, context, cid, limit, offset, before=None):
     get_owned(db, Conversation, context, cid)
+    query = select(Collaboration).where(
+        Collaboration.tenant_id == context.tenant_id, Collaboration.conversation_id == cid
+    )
+    if before:
+        anchor = get_owned(db, Collaboration, context, before)
+        if anchor.conversation_id != cid:
+            from support_agent.errors import missing
+
+            raise missing()
+        query = query.where(
+            tuple_(Collaboration.created_at, Collaboration.id)
+            < tuple_(anchor.created_at, anchor.id)
+        )
+        offset = 0
     return db.scalars(
-        select(Collaboration)
-        .where(Collaboration.tenant_id == context.tenant_id, Collaboration.conversation_id == cid)
-        .order_by(Collaboration.created_at.desc(), Collaboration.id.desc())
+        query.order_by(Collaboration.created_at.desc(), Collaboration.id.desc())
         .limit(limit)
         .offset(offset)
     ).all()

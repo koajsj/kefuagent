@@ -121,6 +121,7 @@ class RuntimeConfig(Input):
 
 
 class BehaviorConfig(Input):
+    answer_mode: Literal["verified_extracts", "evidence_synthesis"] = "verified_extracts"
     description: str = Field(default="", max_length=2000)
     instructions: str = Field(default="", max_length=12000)
     language: str = Field(default="auto", min_length=2, max_length=32, pattern=r"^[a-zA-Z-]+$")

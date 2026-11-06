@@ -17,7 +17,7 @@ SYNONYMS = (
 )
 _WORDS = {word: group for group in SYNONYMS for word in group}
 _PATTERN = re.compile("|".join(re.escape(word) for word in sorted(_WORDS, key=len, reverse=True)))
-_STOP = re.compile(r"请问|如何|怎么|能否|是否|可以|我想|想要|请|吗|呢|的|了|能")
+_STOP = re.compile(r"请问|如何|怎么|能否|是否|可以|我想|想要|需要(?=什么|哪些)|什么|哪些|以及")
 
 
 def query_groups(query):
@@ -32,6 +32,8 @@ def query_groups(query):
     rest = _PATTERN.sub(expand, query.lower())
     rest = _STOP.sub(" ", rest)
     for word in re.findall(r"[㐀-鿿]+|[a-zA-Z0-9_]+", rest):
+        if word in {"了吗", "了呢"}:
+            continue
         if HAN.search(word):
             groups.extend((word[i : i + 2],) for i in range(len(word) - 1))
         elif word.lower() not in {

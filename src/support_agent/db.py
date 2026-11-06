@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from support_agent.config import Settings
 
-EXPECTED_REVISION = "0010_http_ingress"
+EXPECTED_REVISION = "0011_user_memory"
 
 
 def build_database(settings: Settings):

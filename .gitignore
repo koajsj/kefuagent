@@ -22,3 +22,9 @@ build/
 
 # Optional Compose secrets are operator-owned and never published.
 secrets/
+
+# React dependencies and reproducible build output
+node_modules/
+frontend/dist-demo/
+src/support_agent/web-react/
+.playwright-cli/

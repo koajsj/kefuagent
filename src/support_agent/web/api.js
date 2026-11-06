@@ -32,6 +32,9 @@ const errors = {
   conversation_busy: "该会话仍在执行，请等待后使用原请求重试。",
   human_handling_active: "当前会话正在等待或由人工处理，AI 回复已暂停。",
   token_budget_exceeded: "保守 Token 预算不足，请检查用量限制。",
+  summary_source_too_large:
+    "一条完整历史消息超出摘要输入预算，原文和待处理边界均已保留。请由企业管理员提高 Agent 的 max_input_tokens 后重试；系统不会截断该消息后假装已处理。",
+  memory_access_revoked: "会话、模型或凭证授权已变化，摘要和回复已停止交付，请刷新配置。",
   request_limit_exceeded: "请求过于频繁，请稍后重试。",
   concurrency_limit_exceeded: "并发调用已达上限，请等待已有调用结束。",
   insufficient_evidence: "资料不足，无法确认答案。",
@@ -67,6 +70,9 @@ export function createClient() {
     async request(path, options = {}) {
       const epoch = generation,
         controller = new AbortController();
+      const abort = () => controller.abort();
+      if (options.signal?.aborted) abort();
+      else options.signal?.addEventListener("abort", abort, { once: true });
       pending.add(controller);
       const headers = { ...options.headers };
       if (tenant) headers["X-Tenant-ID"] = tenant;
@@ -116,6 +122,7 @@ export function createClient() {
         throw error;
       } finally {
         pending.delete(controller);
+        options.signal?.removeEventListener("abort", abort);
       }
     },
   };

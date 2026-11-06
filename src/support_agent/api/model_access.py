@@ -77,3 +77,11 @@ def call(call_id: UUID, request: Request, db: Database, context: TenantAdmin):
     return chat.reconcile_expired(
         db, context, [get_owned(db, ModelCall, context, call_id)], request
     )[0]
+
+
+@router.get("/model-calls/{call_id}/cost")
+def cost(call_id: UUID, db: Database, context: TenantAdmin):
+    from support_agent.services.costs import estimate
+
+    row = get_owned(db, ModelCall, context, call_id)
+    return {"call_id": row.id, "kind": row.kind, **estimate(row.steps)}

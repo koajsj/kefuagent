@@ -66,6 +66,7 @@ class PublicToolResult(Output):
 
 
 class PublicMessage(Output):
+    id: UUID
     role: Literal["user", "assistant"]
     content: str
     created_at: datetime

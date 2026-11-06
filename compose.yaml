@@ -28,11 +28,13 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=5).close()"]
+      test: ["CMD", "python", "-c", "import os, urllib.request, urllib.parse; h=urllib.parse.urlsplit(os.environ['WEB_ORIGIN']).netloc; r=urllib.request.Request('http://127.0.0.1:8000/api/v1/health/ready', headers={'Host': h}); urllib.request.urlopen(r, timeout=5).close()"]
       interval: 30s
       timeout: 7s
       retries: 3
       start_period: 15s
+    # Allow in-flight requests to drain before the runtime sends SIGKILL.
+    stop_grace_period: 180s
     restart: unless-stopped
 secrets:
   postgres_password:

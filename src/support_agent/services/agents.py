@@ -1,8 +1,19 @@
+from sqlalchemy import select
+
 from support_agent.errors import AppError
 from support_agent.models import AgentConfig
 from support_agent.providers import validate_base_url
 from support_agent.services.audit import record
 from support_agent.services.resources import get_owned
+
+
+def listing(db, context, limit, offset, q):
+    stmt = select(AgentConfig).where(AgentConfig.tenant_id == context.tenant_id)
+    if q.strip():
+        stmt = stmt.where(AgentConfig.name.icontains(q.strip(), autoescape=True))
+    return db.scalars(
+        stmt.order_by(AgentConfig.created_at, AgentConfig.id).limit(limit).offset(offset)
+    ).all()
 
 
 def create(db, context, data, request):

@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 from jsonschema import Draft202012Validator, SchemaError
 from pydantic import Field, field_validator
 
-from support_agent.rag_schemas import Citation
+from support_agent.rag_schemas import AnswerClaim, Citation
 from support_agent.schemas import Input, Output
 
 # A deliberately bounded subset: no refs, regex, combinators or executable extensions.
@@ -229,4 +229,10 @@ class AgentTurnOut(Output):
     error_category: str | None = None
     executions: list[ExecutionOut] = Field(default_factory=list)
     grounded: bool = False
+    grounding_mode: Literal["verified_extracts", "evidence_synthesis_unverified"] = (
+        "verified_extracts"
+    )
+    claims: list[AnswerClaim] = Field(default_factory=list)
+    semantic_verified: Literal[False] = False
+    context_warnings: list[str] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)

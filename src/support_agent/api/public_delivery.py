@@ -1,12 +1,12 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from support_agent.dependencies import Database, TenantAdmin
-from support_agent.models import Publication, VisitorFeedback
+from support_agent.models import Conversation, Publication, VisitorFeedback
 from support_agent.operations_schemas import FeedbackInput, FeedbackOut
 from support_agent.public_schemas import (
     PublicationCreate,
@@ -20,7 +20,7 @@ from support_agent.public_schemas import (
 )
 from support_agent.services import public_delivery as delivery
 from support_agent.services.audit import record
-from support_agent.services.resources import list_owned
+from support_agent.services.resources import get_owned, list_owned
 from support_agent.tool_protocol import AgentTurnOut
 
 router = APIRouter(tags=["Public delivery"])
@@ -85,12 +85,18 @@ def turn(data: VisitorTurn, request: Request, db: Database, context: Visitor):
 @router.get("/public/{pid}/sessions/{sid}/messages", response_model=list[PublicMessage])
 def history(
     request: Request,
+    response: Response,
     db: Database,
     context: Visitor,
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    after: UUID | None = None,
+    before: UUID | None = None,
 ):
-    return delivery.history(db, context, request, limit, offset)
+    rows = delivery.history(db, context, request, limit, offset, after=after, before=before)
+    conversation = get_owned(db, Conversation, context, context.conversation_id)
+    response.headers["X-Conversation-Status"] = conversation.status
+    return rows
 
 
 @router.post("/public/{pid}/sessions/{sid}/end", status_code=204)

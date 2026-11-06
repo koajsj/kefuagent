@@ -315,9 +315,19 @@ def delivery_guard(db, context, request):
     return resume_visitor(db, context, request)
 
 
-def history(db, context, request, limit, offset):
+def history(db, context, request, limit, offset, *, after=None, before=None):
     context = delivery_guard(db, context, request)
-    rows = conversations.history(db, context, context.conversation_id, limit, offset, request, True)
+    rows = conversations.history(
+        db,
+        context,
+        context.conversation_id,
+        limit,
+        offset,
+        request,
+        True,
+        after=after,
+        before=before,
+    )
     call_ids = {
         row.model_call_id
         for row in rows
@@ -383,6 +393,7 @@ def history(db, context, request, limit, offset):
             ]
         result.append(
             {
+                "id": row.id,
                 "role": row.role,
                 "content": row.content,
                 "created_at": row.created_at,

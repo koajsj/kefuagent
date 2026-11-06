@@ -81,6 +81,23 @@ async function check(entry) {
     )
 
 
+def check_react_assets(assets):
+    if not (assets / "index.html").is_file():
+        raise SystemExit(
+            "Missing React build; run npm ci --prefix frontend && npm run build --prefix frontend"
+        )
+    shell = Shell()
+    shell.feed((assets / "index.html").read_text())
+    if shell.ids != ["root"]:
+        raise SystemExit("Invalid React root HTML")
+    for url in shell.assets:
+        relative = url.removeprefix("/")
+        if not relative.startswith("assets/") or not (assets / relative).is_file():
+            raise SystemExit("Missing React entry asset")
+    for script in (assets / "assets").glob("*.js"):
+        subprocess.run(["node", "--check", str(script)], check=True)
+
+
 def check_repository():
     paths = subprocess.check_output(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], text=True
@@ -152,6 +169,7 @@ def main():
     for path in sorted(assets.glob("*.js")):
         subprocess.run(["node", "--check", str(path)], check=True)
     check_assets(assets)
+    check_react_assets(Path("src/support_agent/web-react"))
     check_repository()
     expected_version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
     with zipfile.ZipFile(args.wheel) as package:
@@ -159,6 +177,14 @@ def main():
         for path in assets.iterdir():
             if path.is_file() and "support_agent/web/" + path.name not in names:
                 raise SystemExit("Missing packaged Web asset")
+        for path in Path("src/support_agent/web-react").rglob("*"):
+            if (
+                path.is_file()
+                and "support_agent/web-react/"
+                + path.relative_to("src/support_agent/web-react").as_posix()
+                not in names
+            ):
+                raise SystemExit("Missing packaged React asset")
         metadata = package.read(
             f"support_agent_platform-{expected_version}.dist-info/METADATA"
         ).decode()

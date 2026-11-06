@@ -6,7 +6,7 @@ from support_agent.dependencies import Database, TenantAdmin, TenantContext
 from support_agent.models import AgentConfig
 from support_agent.schemas import AgentCreate, AgentOut, AgentUpdate
 from support_agent.services import agents
-from support_agent.services.resources import get_owned, list_owned
+from support_agent.services.resources import get_owned
 
 router = APIRouter(prefix="/agent-configs", tags=["Agent configurations"])
 
@@ -22,8 +22,9 @@ def list_configs(
     context: TenantContext,
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    q: str = Query("", max_length=120),
 ):
-    return list_owned(db, AgentConfig, context, limit, offset)
+    return agents.listing(db, context, limit, offset, q)
 
 
 @router.get("/{config_id}", response_model=AgentOut)

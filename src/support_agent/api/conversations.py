@@ -108,8 +108,12 @@ def history(
     limit: int = Query(100, ge=1, le=200),
     offset: int = Query(0, ge=0),
     newest: bool = False,
+    after: UUID | None = None,
+    before: UUID | None = None,
 ):
-    return conversations.history(db, context, conversation_id, limit, offset, request, newest)
+    return conversations.history(
+        db, context, conversation_id, limit, offset, request, newest, after=after, before=before
+    )
 
 
 @router.post("/{conversation_id}/chat", response_model=ChatOut)
@@ -206,8 +210,9 @@ def collaboration(
     context: TenantContext,
     limit: int = Query(30, ge=1, le=100),
     offset: int = Query(0, ge=0, le=10000),
+    before: UUID | None = None,
 ):
-    return operations.notes(db, context, conversation_id, limit, offset)
+    return operations.notes(db, context, conversation_id, limit, offset, before)
 
 
 @router.post("/{conversation_id}/collaboration", response_model=CollaborationOut, status_code=201)
@@ -219,7 +224,15 @@ def note(
 
 @router.get("/{conversation_id}/summary", response_model=SummaryOut | None)
 def summary(conversation_id: UUID, db: Database, context: TenantContext):
-    from support_agent.services.memory import latest
+    import json
+
+    from support_agent.services.memory import latest, safe_previous
 
     get_owned(db, Conversation, context, conversation_id)
-    return latest(db, context, conversation_id)
+    row = latest(db, context, conversation_id)
+    if row is None:
+        return None
+    items, _ = safe_previous(db, context, conversation_id, row)
+    return SummaryOut.model_validate(row).model_copy(
+        update={"content": json.dumps(items, ensure_ascii=False)}
+    )

@@ -1,6 +1,6 @@
 # 独立部署、升级与恢复
 
-本项目只使用 PostgreSQL、本地私有文档目录和 Python 服务。Web 资源随 Python 包提供，不需要 Node、前端构建或 CDN。以下包含部署方案与本机恢复验证边界：P6 已在 Mac 隔离副本验证恢复，生产 Linux、HTTPS 反向代理和灾难环境切换尚未验收。
+运行环境使用 PostgreSQL、本地私有文档目录和 Python 服务。React Web 资源在构建机通过 Node 22.12+ 构建，随 Python wheel 提供；运行机不需要 Node 或 CDN。以下包含部署方案与本机恢复验证边界：P6 已在 Mac 隔离副本验证恢复，生产 Linux、HTTPS 反向代理和灾难环境切换尚未验收。
 
 ## Linux 首次安装
 
@@ -10,6 +10,8 @@
 git clone https://github.com/koajsj/kefuagent.git
 cd kefuagent
 uv sync --locked
+npm ci --prefix frontend
+npm run build --prefix frontend
 cp .env.example .env
 chmod 600 .env
 ```
@@ -143,8 +145,21 @@ SSE 代理需关闭响应缓冲（应用返回 X-Accel-Buffering: no），保持
 P8 配置预检、三类健康接口、可选本机 Compose 与显式迁移说明见 [P8 部署](P8_DEPLOYMENT.md)。相关新增表也必须授予运行角色最小表权限并保留 FORCE RLS。
 
 
-P10 当前迁移为 0010_http_ingress；新增共享入口计数表只存 HMAC 与短期计数/租约，须给予运行角色正常 SELECT/INSERT/UPDATE/DELETE 权限，不授予跨业务租户旁路。生产入口开关、同实例组密钥/数据库一致性及尚未验收的容量边界见 [P10 记录](P10_ACCEPTANCE.md)。静态检查与可选只读 schema 检查见 [P7 运行维护](P7_RUNTIME.md)；检查不会执行迁移。
+P10 的 0010_http_ingress 迁移中，新增共享入口计数表只存 HMAC 与短期计数/租约，须给予运行角色正常 SELECT/INSERT/UPDATE/DELETE 权限，不授予跨业务租户旁路。生产入口开关、同实例组密钥/数据库一致性及尚未验收的容量边界见 [P10 记录](P10_ACCEPTANCE.md)。静态检查与可选只读 schema 检查见 [P7 运行维护](P7_RUNTIME.md)；检查不会执行迁移。
 
 上线前逐项记录目标环境检查与未执行项，见 [生产上线检查清单](PRODUCTION_CHECKLIST.md)。
 
 代理缓冲及读超时的语义参考 [Nginx 官方代理模块文档](https://nginx.org/en/docs/http/ngx_http_proxy_module.html)：读超时约束相邻读取间隔，不能当作整个响应的绝对时限。示例与说明只做源码/文档核对，未执行 `nginx -t` 或 TLS 部署。
+
+React 源码更新后必须重新执行正式构建，再构建 wheel 或镜像；不要把 `frontend/dist-demo` 用于正式服务。Dockerfile 含独立 Node 构建阶段（本轮未实际运行 Docker）。Pages Demo 由管理员授权后手动发布，配置与验证见 [前端说明](FRONTEND.md)。
+
+
+## P15-C 部署交接
+
+当前迁移 head 是 `0011_user_memory`；已有部署升级须另行授权，先按上文完成一致备份，再审查增量迁移和新增表的运行权限。`user_memory_consents`、`user_memories` 两表均须授予运行角色必要 CRUD，并核对 ENABLE/FORCE RLS 与同时约束 tenant 和 user 的策略。不要使用自动 downgrade 作为回滚：0011 的 downgrade 会删除用户记忆和同意记录；回退应由 DBA 制定经审查的数据保留与恢复方案。
+
+Compose 的 app 宽限停止时间设为 180 秒，供 Uvicorn 收到终止信号后排空请求；这不是保证外部调用或工具执行完成。先关闭入口并等待在途请求与文档操作完成，再停止 app，确认退出后才停止数据库。超过宽限期会被强制结束，未知结果须查记录并按原幂等键协调，不盲目重发。镜像通过 exec 形式启动 Uvicorn，运行 UID 10001；新卷初始化的目录权限和已有卷的 UID、权限应在目标环境核实。不要通过递归修改或清空已有卷解决权限问题。
+
+上线入口至少配置 HTTPS、精确 Origin、代理拒绝未知 Host 并固定上游 Host、覆盖转发头、代理速率与连接限制，并启用 `HTTP_LIMITS_ENABLED=true` 和所有实例一致的 `HTTP_RATE_KEY`（或按配置使用 `PUBLIC_RATE_KEY`）。限制密钥、阈值及代理信任范围必须一致；预检无法替代对真实代理和直连路径的验证。详细交接、恢复闸门和责任见 [P15-C 运维交接](P15_C_OPERATIONS.md)。
+
+健康检查连接容器回环地址但使用 `WEB_ORIGIN` 的域名及端口作为 Host；系统外探针也应使用该规范 Host。应用 Host 校验按配置的 hostname 执行；反向代理应拒绝未知 Host 并固定发送规范域名，核查其他虚拟主机是否允许绕过。

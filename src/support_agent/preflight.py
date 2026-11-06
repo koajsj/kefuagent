@@ -32,10 +32,17 @@ RLS_TABLES = (
     "conversation_collaboration",
     "conversation_summaries",
     "visitor_feedback",
+    "user_memory_consents",
+    "user_memories",
 )
 POLICY_EXPRESSION = (
     "(tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)"
 )
+USER_POLICY_EXPRESSION = (
+    "((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) "
+    "AND (user_id = (NULLIF(current_setting('app.user_id'::text, true), ''::text))::uuid))"
+)
+USER_MEMORY_TABLES = {"user_memory_consents", "user_memories"}
 
 
 def inspect(settings, engine, *, production=False):
@@ -206,19 +213,45 @@ def inspect(settings, engine, *, production=False):
             and row[4] == "*"
             and row[5]
             and list(row[6]) == [0]
-            and row[7] == POLICY_EXPRESSION
-            and row[8] == POLICY_EXPRESSION
+            and row[7]
+            == (USER_POLICY_EXPRESSION if row[0] in USER_MEMORY_TABLES else POLICY_EXPRESSION)
+            and row[8]
+            == (USER_POLICY_EXPRESSION if row[0] in USER_MEMORY_TABLES else POLICY_EXPRESSION)
             for row in rows
         )
         add(
             "tenant_rls",
             "ok" if valid else "error",
-            "17 张租户表的 FORCE RLS 和租户策略符合预期。"
+            f"{len(RLS_TABLES)} 张租户表的 FORCE RLS 和租户/用户策略符合预期。"
             if valid
             else "租户表 RLS 或策略不符合预期；请审查迁移和数据库策略。",
         )
     except (SQLAlchemyError, OSError):
         add("tenant_rls", "error", "无法检查租户表 RLS；检查数据库连接与目录读取权限。")
+
+    try:
+        with engine.connect() as connection:
+            memory_privileges = connection.execute(
+                text("""
+                    SELECT count(*) = 2 AND bool_and(
+                        has_table_privilege(current_user, c.oid, 'SELECT')
+                        AND has_table_privilege(current_user, c.oid, 'INSERT')
+                        AND has_table_privilege(current_user, c.oid, 'UPDATE')
+                        AND has_table_privilege(current_user, c.oid, 'DELETE'))
+                    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public' AND c.relkind = 'r'
+                      AND c.relname IN ('user_memory_consents', 'user_memories')
+                """)
+            ).scalar_one()
+        add(
+            "user_memory_privileges",
+            "ok" if memory_privileges else "error",
+            "运行角色具有两张用户记忆表的 SELECT/INSERT/UPDATE/DELETE 权限。"
+            if memory_privileges
+            else "缺少用户记忆表或运行权限；由迁移角色明确授权，不能赋予所有权或绕过 RLS。",
+        )
+    except (SQLAlchemyError, OSError):
+        add("user_memory_privileges", "error", "无法检查用户记忆表的运行角色权限。")
 
     setup_complete = False
     try:

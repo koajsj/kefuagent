@@ -6,6 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, FastAPI, Request
@@ -16,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import ClientDisconnect
 
 from support_agent.api import (
@@ -28,6 +30,7 @@ from support_agent.api import (
     public_delivery,
     tenants,
     tools,
+    user_memory,
     workspace,
 )
 from support_agent.config import Settings
@@ -45,6 +48,11 @@ logger = logging.getLogger("support_agent")
 
 
 def create_app(settings: Settings | None = None):
+    if not logger.handlers:
+        logger.addHandler(logging.StreamHandler())
+        logger.propagate = False
+    if logger.level == logging.NOTSET:
+        logger.setLevel(logging.INFO)
     settings = settings or Settings()
     engine, sessions = build_database(settings)
 
@@ -151,7 +159,7 @@ def create_app(settings: Settings | None = None):
         if request.url.path == "/" or request.url.path.startswith(("/chat/", "/assets/")):
             ancestors = "*" if request.url.path.startswith("/chat/") else "'none'"
             response.headers["Content-Security-Policy"] = (
-                f"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors {ancestors}"
+                f"default-src 'none'; script-src 'self'; style-src 'self' 'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o='; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors {ancestors}"
             )
 
         route = request.scope.get("route")
@@ -272,21 +280,28 @@ def create_app(settings: Settings | None = None):
         audit,
         knowledge,
         model_access,
+        user_memory,
         workspace,
         public_delivery,
     ]:
         router.include_router(module.router)
     app.include_router(router)
     web = Path(__file__).parent / "web"
-    app.mount("/assets", StaticFiles(directory=web), name="web-assets")
+    react_web = Path(__file__).parent / "web-react"
+    use_react = (react_web / "index.html").is_file()
+    app.mount(
+        "/assets",
+        StaticFiles(directory=react_web / "assets" if use_react else web),
+        name="web-assets",
+    )
 
     @app.get("/", include_in_schema=False)
     def home():
-        return FileResponse(web / "index.html")
+        return FileResponse((react_web if use_react else web) / "index.html")
 
     @app.get("/chat/{pid}", include_in_schema=False)
     def public_chat(pid: UUID):
-        return FileResponse(web / "public.html")
+        return FileResponse(react_web / "index.html" if use_react else web / "public.html")
 
     @app.get("/widget.js", include_in_schema=False)
     def widget():
@@ -294,5 +309,10 @@ def create_app(settings: Settings | None = None):
 
     app.add_middleware(
         IngressMiddleware, sessions=sessions, settings=settings, pending=app.state.ingress_jobs
+    )
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=[urlsplit(settings.web_origin).hostname],
+        www_redirect=False,
     )
     return app

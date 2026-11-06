@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 
 from support_agent.errors import AppError, forbidden
 from support_agent.models import Conversation, Message
@@ -91,16 +91,31 @@ def append_message(db, context, conversation_id, data, request):
     return message
 
 
-def history(db, context, conversation_id, limit, offset, request, newest=False):
+def history(
+    db, context, conversation_id, limit, offset, request, newest=False, *, after=None, before=None
+):
     get_owned(db, Conversation, context, conversation_id)
+    if after and before:
+        raise AppError(422, "invalid_cursor", "Use either after or before, not both")
+    descending = bool(before) or (newest and not after)
     ordering = (
         [Message.created_at.desc(), Message.id.desc()]
-        if newest
+        if descending
         else [Message.created_at, Message.id]
     )
     query = select(Message).where(
         Message.tenant_id == context.tenant_id, Message.conversation_id == conversation_id
     )
+    if after or before:
+        anchor = get_owned(db, Message, context, after or before)
+        if anchor.conversation_id != conversation_id:
+            from support_agent.errors import missing
+
+            raise missing()
+        position = tuple_(Message.created_at, Message.id)
+        boundary = tuple_(anchor.created_at, anchor.id)
+        query = query.where(position > boundary if after else position < boundary)
+        offset = 0
     if context.public_session_id is not None:
         # Paginate the public transcript, excluding intermediate model/tool protocol rows.
         query = query.where(
@@ -114,14 +129,16 @@ def history(db, context, conversation_id, limit, offset, request, newest=False):
             )
         )
     rows = list(db.scalars(query.order_by(*ordering).limit(limit).offset(offset)))
-    if newest:
+    if descending:
         rows.reverse()
     from support_agent.models import ModelCall, ToolExecution
     from support_agent.schemas import MessageOut
     from support_agent.services.tool_execution import ensure_delivery
 
     # Batch associations for this page; permission/source checks below remain per call.
-    call_ids = {row.model_call_id for row in rows if row.source == "agent" and row.role != "user"}
+    call_ids = {
+        row.model_call_id for row in rows if row.source in {"agent", "rag"} and row.role != "user"
+    }
     calls = (
         {
             call.id: call
@@ -146,7 +163,7 @@ def history(db, context, conversation_id, limit, offset, request, newest=False):
     checked = {}
     result = []
     for row in rows:
-        if row.source == "agent" and row.role != "user":
+        if row.source in {"agent", "rag"} and row.role != "user":
             if row.model_call_id not in checked:
                 call = calls.get(row.model_call_id)
                 if call is None:
@@ -157,13 +174,12 @@ def history(db, context, conversation_id, limit, offset, request, newest=False):
                 try:
                     ensure_delivery(db, context, call, executions, request)
                     checked[call.id] = True
-                    if context.public_session_id is not None:
-                        from support_agent.services import agent_turns, workspace
+                    from support_agent.services import agent_turns, workspace
 
-                        allowed = workspace.knowledge_ids(db, context, call.agent_config_id)
-                        checked[call.id] = agent_turns.current_citations(
-                            db, context, call, request, allowed
-                        )
+                    allowed = workspace.knowledge_ids(db, context, call.agent_config_id)
+                    checked[call.id] = agent_turns.current_citations(
+                        db, context, call, request, allowed
+                    )
                 except AppError:
                     checked[call.id] = False
             if not checked[row.model_call_id]:

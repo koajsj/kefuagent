@@ -15,3 +15,8 @@ __pycache__
 *.pfx
 .pgpass
 secrets
+
+node_modules
+frontend/dist-demo
+
+src/support_agent/web-react

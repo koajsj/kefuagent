@@ -55,3 +55,14 @@
 | uvicorn | 0.54.0 | BSD-3-Clause | uvicorn-0.54.0.dist-info/licenses/LICENSE.md |
 
 psycopg/psycopg-binary 为 LGPL-3.0 系列，certifi 为 MPL-2.0；cryptography 为 Apache-2.0/BSD 双许可并包含底层库声明，lxml 及其二进制组件以包内各授权文本为准。快照记录时没有静态链接、改库或制作二进制分发；分发包/镜像必须复查实际依赖和附带组件的授权义务，并保留适用的授权文件。
+
+## React 前端（2026-11-06）
+
+前端精确依赖和传递依赖见 `frontend/package-lock.json`。已读取安装包的元数据与根目录许可证/声明文件；运行依赖原文汇总到 [THIRD_PARTY_NOTICES](../frontend/THIRD_PARTY_NOTICES.txt)，随两种构建分发。没有修改上游包，没有移植 BoardUI 源码。
+
+- HeroUI React/Styles：Apache-2.0；[官方安装指南](https://heroui.com/docs/react/getting-started/quick-start)要求 React 19+ / Tailwind v4，无 Provider。
+- React、React DOM、React Router、Tailwind、Vite、TypeScript：MIT；React Aria 与国际化依赖的声明保留在汇总文件中。
+- Lucide：ISC。BoardUI CLI 的 npm 元数据为 MIT，但本轮仅使用 MCP/Skill 方案参考，不分发 BoardUI 组件源码。
+- `client-only@0.0.1` 的 [npm 发行元数据](https://www.npmjs.com/package/client-only)声明 MIT，但包内没有许可原文或版权声明，不能据此臆造 Meta/Vercel 归属。本纯浏览器 SPA 在 Vite 将其无绑定的副作用导入替换为本项目自写的空虚拟模块，正式/Demo 全构建图均禁止任何 `node_modules/client-only/` 模块；不分发原包三个文件或 npm archive。锁文件保留安装关系，未升级/删除依赖。此边界不适用于未来 SSR/RSC、node_modules/npm 缓存或原包再分发；这些发布须重新解决许可来源。
+
+兼容性来源：[Vite](https://vite.dev/guide/)、[Tailwind Vite](https://tailwindcss.com/docs/installation/using-vite)、[React Router](https://reactrouter.com/start/declarative/installation)，以及实际安装 peerDependencies。构建和 npm ls 验证的是本机锁定组合，不代表所有平台通过。

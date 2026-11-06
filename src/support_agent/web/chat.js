@@ -34,11 +34,15 @@ export async function chatPage(ctx) {
     historyOffset = 0,
     busy = false,
     openEpoch = 0;
-  const [agents, operators] = await Promise.all([ctx.api("/agent-configs?limit=100"), ctx.api("/workspace/operators")]);
+  let operators = null;
+  let stopPolling = () => {};
   let filters = {}, listEpoch = 0;
+  ctx.onDispose(() => { ++openEpoch; ++listEpoch; stopPolling(); });
   const list = el("div", { class: "panel flush conversation-list" }),
     main = el("section", { class: "chat-main" });
   const listPager = el("div");
+  const filterArea = el("div");
+  const operatorsState = el("div", {"aria-live":"polite"});
   const showError = (error) => {
     if (
       ctx.isCurrent() &&
@@ -46,6 +50,21 @@ export async function chatPage(ctx) {
     )
       ctx.notify(error.code === "version_conflict" ? "会话已被其他人更新，请重新打开会话后再操作。" : error.message);
   };
+  function renderFilters() {
+    filterArea.replaceChildren(operationFilters(operators || [], values => { filters = values; offset = 0; loadList().catch(showError); }));
+  }
+  async function loadOperators() {
+    operatorsState.replaceChildren(message("正在加载负责人…"));
+    try {
+      const rows = await ctx.api("/workspace/operators");
+      if (!ctx.isCurrent()) return;
+      operators = rows;
+      renderFilters();
+      operatorsState.replaceChildren(...(selected ? [message("负责人已加载，重新打开会话可编辑负责人。")] : []));
+    } catch (error) {
+      if (ctx.isCurrent()) operatorsState.replaceChildren(message("负责人加载失败：" + error.message, "error"), button("重试", loadOperators));
+    }
+  }
   async function createConversation() {
     const subject = prompt("会话标题", "新会话");
     if (!subject?.trim()) return;
@@ -94,23 +113,38 @@ export async function chatPage(ctx) {
       ctx.notify("当前发送尚未结束，请等待或查看运行状态。");
       return;
     }
+    stopPolling();
     const ticket = ++openEpoch;
     const next = await ctx.api("/conversations/" + row.id);
-    if (ticket !== openEpoch) return;
+    if (!ctx.isCurrent() || ticket !== openEpoch) return;
     selected = next;
     historyOffset = 0;
     const cid = selected.id;
-    const agent = select(
-      "agent",
-      agents.map((a) => ({
-        id: a.id,
-        name:
-          a.name +
-          (a.provider === "demo" ? " · 离线演示" : " · 真实模型配置") +
-          (a.enabled ? "" : "（停用）"),
-      })),
-      agents.find((a) => a.enabled)?.id || "",
-    );
+    const agent = select("agent", []);
+    const search = input("agent_search", "", {placeholder:"搜索 Agent", maxLength:120});
+    const agentPager = el("div", {"aria-live":"polite"});
+    let agentOffset = 0, agentEpoch = 0, agentQuery = "", searchTimer;
+    const choices = new Map();
+    async function loadAgents() {
+      const request = ++agentEpoch;
+      agentPager.replaceChildren(message("正在加载 Agent…"));
+      let rows;
+      try { rows = await ctx.api(`/agent-configs?${new URLSearchParams({q:agentQuery, limit:'50', offset:String(agentOffset)})}`); }
+      catch (error) { if (ctx.isCurrent() && ticket === openEpoch && request === agentEpoch) agentPager.replaceChildren(message('Agent 加载失败：' + error.message, 'error'), button('重试', loadAgents)); return; }
+      if (!ctx.isCurrent() || ticket !== openEpoch || request !== agentEpoch) return;
+      const previous = agent.value;
+      for (const a of rows) choices.set(a.id, a);
+      const selectedAgent = choices.get(previous);
+      const visible = selectedAgent && !rows.some(a => a.id === previous) ? [selectedAgent, ...rows] : rows;
+      agent.replaceChildren(...visible.map(a => el('option', {value:a.id, disabled:!a.enabled}, a.name + (a.provider === 'demo' ? ' · 离线演示' : ' · 真实模型配置') + (a.enabled ? '' : '（停用）'))));
+      if (selectedAgent) agent.value = previous;
+      agentPager.replaceChildren(...(rows.length ? [] : [message(agentQuery ? "没有匹配的 Agent。" : "暂无 Agent，请联系管理员配置。")]), pager(agentOffset, rows.length, 50, next => { agentOffset = next; loadAgents(); }));
+      send.disabled = busy || !canSend();
+    }
+    search.addEventListener('input', () => {
+      clearTimeout(searchTimer); ++agentEpoch;
+      searchTimer = setTimeout(() => { agentQuery = search.value.trim(); agentOffset = 0; loadAgents().catch(showError); }, 300);
+    });
     const runState = el("span", { class: "run-state" }, "尚未发送");
     const thread = el("div", {
       class: "thread",
@@ -118,13 +152,35 @@ export async function chatPage(ctx) {
       "aria-label": "对话历史",
     });
     const historyPager = el("div");
-    async function readHistory() {
-      const rows = await ctx.api(
-        `/conversations/${cid}/messages?newest=true&limit=50&offset=${historyOffset}`,
+    let historyEpoch = 0, latestId = null, historyLoading = 0;
+    const displayedIds = new Set();
+    const newMessages = button("有新消息，查看最新", () => { historyOffset = 0; readHistory().catch(showError); });
+    newMessages.hidden = true;
+    async function readHistory(signal) {
+      const historyTicket = ++historyEpoch;
+      const pageOffset = historyOffset;
+      historyLoading++;
+      let rows;
+      try { rows = await ctx.api(`/conversations/${cid}/messages?newest=true&limit=50&offset=${pageOffset}`, signal ? {signal} : {}); }
+      finally { historyLoading--; }
+      if (!ctx.isCurrent() || ticket !== openEpoch || historyTicket !== historyEpoch || selected?.id !== cid) return;
+      if (pageOffset === 0) { latestId = rows.at(-1)?.id || null; newMessages.hidden = true; }
+      displayedIds.clear();
+      rows.forEach(m => displayedIds.add(m.id));
+      thread.replaceChildren(...rows.map(renderMessage));
+      if (!rows.length)
+        thread.append(
+          empty("输入问题后发送。答案、知识来源和工具结果会保存在本会话。"),
+        );
+      historyPager.replaceChildren(
+        pager(historyOffset, rows.length, 50, (next) => {
+          historyOffset = next;
+          readHistory().catch(showError);
+        }),
       );
-      if (selected?.id !== cid) return;
-      thread.replaceChildren(
-        ...rows.map((m) => {
+      thread.scrollTop = thread.scrollHeight;
+    }
+    function renderMessage(m) {
           const name =
             m.role === "user"
               ? "用户"
@@ -168,24 +224,11 @@ export async function chatPage(ctx) {
               ),
             );
           return node;
-        }),
-      );
-      if (!rows.length)
-        thread.append(
-          empty("输入问题后发送。答案、知识来源和工具结果会保存在本会话。"),
-        );
-      historyPager.replaceChildren(
-        pager(historyOffset, rows.length, 50, (next) => {
-          historyOffset = next;
-          readHistory().catch(showError);
-        }),
-      );
-      thread.scrollTop = thread.scrollHeight;
     }
-    const runs = el("div");
+    const runs = el("div", {"aria-live":"polite"}, message("正在加载运行记录…"));
     async function readRuns() {
       const calls = await ctx.api(`/conversations/${cid}/calls?limit=5`);
-      if (selected?.id !== cid) return;
+      if (!ctx.isCurrent() || ticket !== openEpoch || selected?.id !== cid) return;
       const current = calls[0];
       if (current)
         runState.textContent =
@@ -196,6 +239,7 @@ export async function chatPage(ctx) {
             ? " · " + explain(current.error_category)
             : "");
       runs.replaceChildren(
+        ...(calls.length ? [] : [empty("暂无运行记录。")]),
         ...calls.map((c) =>
           el(
             "details",
@@ -235,11 +279,11 @@ export async function chatPage(ctx) {
           : "咨询企业知识，或使用已授权的只读工具…",
       "aria-label": "消息内容",
     });
-    const human = selected.support_state === "human";
+    let human = selected.support_state === "human";
     const publicView = selected.channel === "public";
     const canSend = () => selected?.id === cid && selected.status === "open" && (human
       ? selected.support_state === "human" && (ctx.role === "admin" || selected.assignee_id === ctx.user.id)
-      : selected.support_state === "ai" && agents.length > 0 && !publicView);
+      : selected.support_state === "ai" && !!agent.value && !agent.selectedOptions[0]?.disabled && !publicView);
     agent.disabled = publicView;
     const send = el(
       "button",
@@ -250,6 +294,7 @@ export async function chatPage(ctx) {
       },
       human ? "发送人工答复" : "发送消息",
     );
+    agent.addEventListener("change", () => { send.disabled = busy || !canSend(); });
     composer.append(
       content,
       el("div", { class: "composer-footer" }, runState, send),
@@ -269,6 +314,7 @@ export async function chatPage(ctx) {
       agent.disabled = true;
       inline.replaceChildren();
       runState.textContent = "正在提交…";
+      const submittedContent = content.value;
       const keyName = "support.pending." + ctx.tenant + "." + cid;
       try {
         if (human) {
@@ -334,7 +380,7 @@ export async function chatPage(ctx) {
               ),
             );
         }
-        content.value = "";
+        if (content.value === submittedContent) content.value = "";
         await readHistory();
         await loadList();
         await readRuns();
@@ -358,9 +404,7 @@ export async function chatPage(ctx) {
           try {
             const current = await ctx.api(`/conversations/${cid}`);
             if (ctx.isCurrent() && selected?.id === cid && ticket === openEpoch) {
-              selected = current;
-              send.disabled = !canSend();
-              agent.disabled = publicView || current.status !== "open";
+              updateConversation(current);
               if (!canSend()) inline.append(message("会话状态或权限已变化，请重新打开会话查看。"));
             }
           } catch (error) {
@@ -383,6 +427,8 @@ export async function chatPage(ctx) {
       }
     }
     const controls = actions();
+    function updateControls() {
+    controls.replaceChildren();
     if (selected.status === "open" && (selected.support_state !== "human" || ctx.role === "admin" || selected.assignee_id === ctx.user.id))
       controls.append(button("标记待人工", () => handling("waiting")));
     if (ctx.role === "admin") {
@@ -406,6 +452,9 @@ export async function chatPage(ctx) {
         controls.append(button("标记已解决", () => handling("resolved")));
       }
     }
+    }
+    updateControls();
+    let stateLabel = status(selected.support_state);
     const operations = await operationsPanel(ctx, selected, operators, () => ctx.isCurrent() && selected?.id === cid && ticket === openEpoch, () => open({id:cid}));
     if (!ctx.isCurrent() || selected?.id !== cid || ticket !== openEpoch) return;
     main.replaceChildren(
@@ -413,12 +462,13 @@ export async function chatPage(ctx) {
         "div",
         { class: "chat-controls" },
         el("h2", {}, selected.subject),
-        status(selected.support_state),
-        label("当前 Agent", agent),
+        stateLabel,
+        label("搜索 Agent", search),
+        label("当前 Agent", agent), agentPager,
         controls,
       ),
       thread,
-      historyPager,
+      historyPager, newMessages,
       composer,
       inline,
       el("div", { class: "chat-controls" }, el("h3", {}, "最近运行"), runs),
@@ -430,13 +480,97 @@ export async function chatPage(ctx) {
           "已标记待人工。管理员或符合权限的成员可接管；当前不会自动发送给外部客服。",
         ),
       );
-    if (!agents.length)
-      inline.append(
-        message("尚未配置 Agent，请联系管理员创建离线演示或真实模型配置。"),
-      );
-    await readHistory();
-    await readRuns();
-    await loadList();
+    let operationsStale = false;
+    function updateConversation(current) {
+      const changed = selected.support_state !== current.support_state || selected.status !== current.status || selected.assignee_id !== current.assignee_id || selected.version !== current.version;
+      selected = current;
+      human = current.support_state === "human";
+      send.disabled = busy || !canSend();
+      agent.disabled = busy || publicView || current.status !== "open";
+      if (!changed) return;
+      const nextLabel = status(current.support_state);
+      stateLabel.replaceWith(nextLabel); stateLabel = nextLabel;
+      updateControls();
+      send.textContent = human ? "发送人工答复" : "发送消息";
+      content.placeholder = human ? "输入人工答复…" : "咨询企业知识，或使用已授权的只读工具…";
+      if (!operationsStale) {
+        operationsStale = true;
+        operations.querySelectorAll('form input, form select, form textarea, form button').forEach(control => { control.disabled = true; });
+        operations.prepend(message("会话状态或负责人已变化。草稿已保留，重新打开会话后可更新运营信息。", "warning"), button("重新打开会话", () => open({id:cid}).catch(showError)));
+      }
+    }
+    loadAgents();
+    async function loadHistoryView() {
+      thread.replaceChildren(message("正在加载消息…"));
+      try { await readHistory(); }
+      catch (error) { if (ctx.isCurrent() && ticket === openEpoch) thread.replaceChildren(message(error.message, "error"), button("重试加载消息", loadHistoryView)); }
+    }
+    async function loadRunsView() {
+      runs.replaceChildren(message("正在加载运行记录…"));
+      try { await readRuns(); }
+      catch (error) { if (ctx.isCurrent() && ticket === openEpoch) runs.replaceChildren(message(error.message, "error"), button("重试", loadRunsView)); }
+    }
+    loadHistoryView();
+    loadRunsView();
+    loadList().catch(showError);
+    let timer, stopped = false, pagePaused = false, failures = 0, polling = false, pollController;
+    const active = () => !stopped && ctx.isCurrent() && ticket === openEpoch && selected?.id === cid && selected.status === 'open';
+    const schedule = delay => { clearTimeout(timer); if (active() && !document.hidden && !pagePaused) timer = setTimeout(poll, delay); };
+    async function poll() {
+      if (!active() || document.hidden || pagePaused || polling) return;
+      polling = true;
+      pollController = new AbortController();
+      const signal = pollController.signal;
+      try {
+        const previous = selected;
+        const current = await ctx.api(`/conversations/${cid}`, {signal});
+        if (!active()) return;
+        if (selected !== previous) return;
+        updateConversation(current);
+        if (current.status !== "open") {
+          stopPolling();
+          historyOffset = 0;
+          try { await readHistory(); }
+          catch (error) { if (ctx.isCurrent() && ticket === openEpoch) thread.replaceChildren(message(error.message, "error"), button("重试加载消息", loadHistoryView)); }
+          return;
+        }
+        if (historyLoading) { failures = 0; return; }
+        if (!latestId) { if (!busy && historyOffset === 0) await readHistory(signal); }
+        else {
+          const anchor = latestId, pageEpoch = historyEpoch;
+          const rows = await ctx.api(`/conversations/${cid}/messages?limit=100&after=${encodeURIComponent(anchor)}`, {signal});
+          if (!active()) return;
+          if (historyEpoch === pageEpoch && !historyLoading && latestId === anchor && rows.length) {
+            latestId = rows.at(-1).id;
+            if (historyOffset === 0) {
+              if (!displayedIds.size) thread.replaceChildren();
+              for (const row of rows) if (!displayedIds.has(row.id)) { displayedIds.add(row.id); thread.append(renderMessage(row)); }
+            } else newMessages.hidden = false;
+          }
+        }
+        failures = 0;
+      }
+      catch (error) {
+        if (signal.aborted || error.name === "AbortError") return;
+        if ([401, 403, 404, 410].includes(error.status) || error.code === "conversation_closed") { stopPolling(); showError(error); return; }
+        failures = Math.min(failures + 1, 4);
+      }
+      finally { polling = false; pollController = null; schedule(Math.min(60000, 5000 * 2 ** failures)); }
+    }
+    const visibility = () => { if (document.hidden) { clearTimeout(timer); pollController?.abort(); } else schedule(5000); };
+    const pagehide = () => { pagePaused = true; clearTimeout(timer); pollController?.abort(); };
+    const pageshow = () => { pagePaused = false; schedule(5000); };
+    document.addEventListener('visibilitychange', visibility);
+    window.addEventListener('pagehide', pagehide);
+    window.addEventListener('pageshow', pageshow);
+    stopPolling = () => {
+      stopped = true; clearTimeout(timer); pollController?.abort();
+      document.removeEventListener('visibilitychange', visibility);
+      window.removeEventListener('pagehide', pagehide);
+      window.removeEventListener('pageshow', pageshow);
+      clearTimeout(searchTimer);
+    };
+    schedule(5000);
   }
   root.append(
     heading(
@@ -444,11 +578,13 @@ export async function chatPage(ctx) {
       "基于企业知识和已授权工具回答，保留每一步处理记录。",
       button("新建会话", createConversation, "primary"),
     ),
-    el("div", { class: "chat-layout" }, el("div", {}, operationFilters(operators, values => { filters = values; offset = 0; loadList().catch(showError); }), list, listPager), main),
+    el("div", { class: "chat-layout" }, el("div", {}, filterArea, operatorsState, list, listPager), main),
   );
   main.append(
     empty("选择会话查看历史，或新建会话。企业成员共享当前企业的工作区。"),
   );
+  renderFilters();
+  loadOperators();
   await loadList();
   return root;
 }
