@@ -116,6 +116,8 @@ class ToolOut(ToolSpec, Output):
     created_by: UUID
     created_at: datetime
     updated_at: datetime
+    runtime_bound: bool = False
+    binding_error: str | None = None
 
 
 class ToolPatch(Input):
@@ -123,6 +125,7 @@ class ToolPatch(Input):
 
 
 class ToolCall(Input):
+    approval_id: UUID | None = None
     arguments: dict
     conversation_id: UUID | None = None
     agent_config_id: UUID | None = None
@@ -178,6 +181,7 @@ class AgentToolOut(Output):
 
 
 class CapabilityOut(Output):
+    minimum_risk: int = Field(default=1, ge=0, le=4)
     key: str
     version: int
     parameters: dict

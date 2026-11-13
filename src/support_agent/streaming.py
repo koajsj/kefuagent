@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from support_agent.dependencies import resume_context
 from support_agent.errors import AppError
 from support_agent.models import ModelCall
+from support_agent.public_schemas import VisitorMessageReceipt
 from support_agent.services import agent_turns, model_runtime, public_delivery
 from support_agent.services.audit import record_failure
 from support_agent.services.resources import get_owned
@@ -39,6 +40,8 @@ def response(request, context, conversation_id, data, *, public=False):
                     else agent_turns.turn(db, current, conversation_id, data, work_request)
                 )
                 db.commit()
+                if isinstance(result, VisitorMessageReceipt):
+                    return {"message_id": result.message_id}
                 return {"call_id": result.call_id}
         except AppError as exc:
             try:
@@ -55,12 +58,17 @@ def response(request, context, conversation_id, data, *, public=False):
             # Any interrupted durable reservation is reconciled by its existing lease mechanism.
             return {"error_category": "interrupted_result_unknown", "result_unknown": True}
 
-    def snapshot(call_id):
+    def snapshot(result):
         with request.app.state.sessions.begin() as db:
             current = resume_context(db, context, work_request)
-            call = get_owned(db, ModelCall, current, call_id)
+            if "message_id" in result:
+                current = public_delivery.delivery_guard(db, current, work_request)
+                return public_delivery.message_receipt(
+                    db, current, result["message_id"], work_request
+                ).model_dump(mode="json")
+            call = get_owned(db, ModelCall, current, result["call_id"])
             if call.status != "failed" and (
-                reason := model_runtime.delivery_error(db, current, call)
+                reason := model_runtime.delivery_error(db, current, call, work_request)
             ):
                 raise AppError(409, reason, "Stream delivery is no longer authorized")
             return agent_turns.output(db, current, call, work_request).model_dump(mode="json")
@@ -114,7 +122,10 @@ def response(request, context, conversation_id, data, *, public=False):
             yield frame("failed", result)
             return
         try:
-            final = await asyncio.to_thread(snapshot, result["call_id"])
+            final = await asyncio.to_thread(snapshot, result)
+            if final["status"] == "received":
+                yield frame("completed", final)
+                return
             if final["status"] == "running":
                 yield frame("pending", {"call_id": final["call_id"], "result_unknown": True})
                 return
@@ -133,7 +144,7 @@ def response(request, context, conversation_id, data, *, public=False):
                     continue
                 if await request.is_disconnected():
                     return
-                current = await asyncio.to_thread(snapshot, result["call_id"])
+                current = await asyncio.to_thread(snapshot, result)
                 if current != final:
                     yield frame(
                         "failed", {"error_category": "delivery_changed", "discard_deltas": True}
@@ -143,14 +154,14 @@ def response(request, context, conversation_id, data, *, public=False):
                 yield frame("delta", {"text": buffered, "call_id": final["call_id"]})
                 buffered = ""
             # One final revocation/source check; no database transaction survives a yield.
-            if await asyncio.to_thread(snapshot, result["call_id"]) != final:
+            if await asyncio.to_thread(snapshot, result) != final:
                 yield frame(
                     "failed", {"error_category": "delivery_changed", "discard_deltas": True}
                 )
                 return
             if buffered:
                 yield frame("delta", {"text": buffered, "call_id": final["call_id"]})
-                if await asyncio.to_thread(snapshot, result["call_id"]) != final:
+                if await asyncio.to_thread(snapshot, result) != final:
                     yield frame(
                         "failed", {"error_category": "delivery_changed", "discard_deltas": True}
                     )

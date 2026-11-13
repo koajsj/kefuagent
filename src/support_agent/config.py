@@ -1,7 +1,8 @@
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
@@ -25,6 +26,7 @@ class Settings(BaseSettings):
     http_sse_global_connections: int = Field(default=32, ge=1, le=128)
     session_hours: int = Field(default=12, ge=1, le=168)
     web_origin: str = "http://127.0.0.1:8000"
+    widget_instance_id: UUID | None = None
     allow_external_models: bool = False
     public_rate_key: SecretStr | None = Field(default=None, min_length=32, max_length=256)
 
@@ -55,7 +57,77 @@ class Settings(BaseSettings):
     retention_calls_days: int | None = Field(default=None, ge=2, le=36500)
     retention_audit_days: int | None = Field(default=None, ge=30, le=36500)
     document_storage_root: Path = Path(".local/documents")
+    document_storage_backend: Literal["local", "s3"] = "local"
+    s3_endpoint: str | None = None
+    s3_bucket: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+    s3_region: str = Field(default="us-east-1", pattern=r"^[a-zA-Z0-9-]{1,64}$")
+    s3_prefix: str = Field(default="kefu", pattern=r"^[a-zA-Z0-9_/-]{0,120}$")
+    s3_access_key: SecretStr | None = None
+    s3_secret_key: SecretStr | None = None
+    s3_session_token: SecretStr | None = None
+
+    @field_validator("s3_access_key", "s3_secret_key", "s3_session_token")
+    @classmethod
+    def safe_storage_secret(cls, value):
+        if value is not None and (
+            not value.get_secret_value()
+            or len(value.get_secret_value()) > 8192
+            or any(ord(c) < 33 or ord(c) > 126 for c in value.get_secret_value())
+        ):
+            raise ValueError(
+                "Storage credentials must be nonempty printable ASCII without whitespace"
+            )
+        return value
+
+    @field_validator("s3_endpoint")
+    @classmethod
+    def safe_s3_endpoint(cls, value):
+        if value is None:
+            return value
+        from urllib.parse import urlsplit
+
+        url = urlsplit(value)
+        if (
+            url.scheme not in {"https", "http"}
+            or not url.hostname
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+            or url.path not in {"", "/"}
+            or (url.scheme == "http" and url.hostname not in {"localhost", "127.0.0.1", "::1"})
+        ):
+            raise ValueError(
+                "Use an exact HTTPS object storage origin; HTTP is loopback development only"
+            )
+        return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def storage_ready(self):
+        if self.document_storage_backend == "s3" and not all(
+            (self.s3_endpoint, self.s3_bucket, self.s3_access_key, self.s3_secret_key)
+        ):
+            raise ValueError("S3 requires endpoint, bucket and deployment-owned credentials")
+        if (
+            self.document_storage_backend == "s3"
+            and self.deployment_environment == "production"
+            and not self.s3_endpoint.startswith("https://")
+        ):
+            raise ValueError("Production object storage requires HTTPS")
+        return self
+
     model_allowed_hosts: list[str] = Field(default_factory=list)
+    # Deployment-owned opt-in subset. HTTPS/443 and certificate verification remain mandatory.
+    model_private_hosts: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def private_model_hosts_approved(self):
+        if not set(self.model_private_hosts).issubset(self.model_allowed_hosts):
+            raise ValueError(
+                "Private model hosts must also be explicitly approved in model_allowed_hosts"
+            )
+        return self
+
     model_prices: list[ModelPrice] = Field(default_factory=list, max_length=100)
 
     @field_validator("model_prices")

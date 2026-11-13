@@ -1,5 +1,7 @@
 import { readEvents } from "./stream.js";
 const errors = {
+  idempotency_conflict: "请求标识已用于其他输入，请先核对原操作，不要盲目更换标识重试。",
+  storage_unavailable: "文档存储不可用或内容不匹配，请保留原文件并联系管理员检查。",
   http_limit_exceeded: "请求或连接过于频繁，请稍后重试。",
   ingress_unavailable: "请求准入暂不可用，请稍后重试。",
   public_rate_key_unavailable:
@@ -74,6 +76,11 @@ export function createClient() {
       if (options.signal?.aborted) abort();
       else options.signal?.addEventListener("abort", abort, { once: true });
       pending.add(controller);
+      const assertCurrent = () => {
+        if (epoch !== generation) throw new StaleResponse();
+        if (controller.signal.aborted)
+          throw new DOMException("请求已取消，结果可能未知。", "AbortError");
+      };
       const headers = { ...options.headers };
       if (tenant) headers["X-Tenant-ID"] = tenant;
       let body = options.body;
@@ -90,17 +97,17 @@ export function createClient() {
           credentials: "same-origin",
           cache: "no-store",
         });
-        if (epoch !== generation) throw new StaleResponse();
+        assertCurrent();
         if (response.ok && options.onEvent) {
           const result = await readEvents(response, (event, value) => {
-            if (epoch !== generation) throw new StaleResponse();
+            assertCurrent();
             options.onEvent(event, value);
           });
-          if (epoch !== generation) throw new StaleResponse();
+          assertCurrent();
           return result;
         }
         const value = response.status === 204 ? null : await response.json();
-        if (epoch !== generation) throw new StaleResponse();
+        assertCurrent();
         if (!response.ok) {
           const error = new Error(
             explain(value?.error?.code, value?.error?.message),
@@ -114,7 +121,7 @@ export function createClient() {
         }
         return value;
       } catch (error) {
-        if (epoch !== generation) throw new StaleResponse();
+        assertCurrent();
         if (error instanceof TypeError)
           throw new Error(
             "网络连接中断，操作结果可能未知。请检查记录，重试发送将复用原请求标识。",

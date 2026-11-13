@@ -16,13 +16,16 @@ class ModelPrice(Input):
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     input_per_million: Decimal = Field(ge=0, max_digits=18, decimal_places=9)
     output_per_million: Decimal = Field(ge=0, max_digits=18, decimal_places=9)
+    context_window_tokens: int | None = Field(default=None, ge=1, le=100000000)
+    cost_bound_verified: bool = False
+    valid_until: datetime | None = None
     source: str = Field(min_length=1, max_length=500)
     effective_at: datetime
 
-    @field_validator("effective_at")
+    @field_validator("effective_at", "valid_until")
     @classmethod
     def aware(cls, value):
-        if value.tzinfo is None:
+        if value is not None and value.tzinfo is None:
             raise ValueError("Price effective_at needs an explicit timezone")
         return value
 

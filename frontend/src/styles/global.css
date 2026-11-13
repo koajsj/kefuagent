@@ -1216,3 +1216,32 @@ button.primary:hover:not(:disabled) {
     flex-direction: column;
   }
 }
+
+.message-highlight { outline: 2px solid var(--accent, #4768d8); outline-offset: 3px; }
+
+/* Service desk: task controls and evidence sit beside each other. */
+.desk-filters { display: flex; gap: 12px; align-items: end; margin-bottom: 16px; }
+.desk-filters > label { flex: 1; max-width: 420px; }
+.desk-detail-grid { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(300px, .85fr); gap: 20px; align-items: start; }
+.desk-detail-grid form, .route-field { display: grid; gap: 14px; }
+.desk-event { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.desk-event small { display: block; color: var(--text-muted); }
+.desk-description { white-space: pre-wrap; overflow-wrap: anywhere; }
+.route-field { padding-bottom: 16px; }
+.data-table td { font-variant-numeric: tabular-nums; }
+@media (max-width: 1050px) { .desk-detail-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* Taste framed-sheet: a shared quiet frame and one inset working surface. */
+.app-main, .sidebar, .topbar { background: var(--surface-muted); }
+.sidebar { border-right: 0; }
+.topbar { min-height: 48px; border-bottom: 0; }
+.main-content { width: calc(100% - 16px); flex: 1; margin-bottom: 8px; padding: 24px; background: var(--surface); border: 1px solid var(--line-soft); border-radius: 16px; }
+.customer-context { display: grid; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--line-soft); }
+.customer-context form, .file-attachments form { display: grid; gap: 10px; }
+.handoff-packet { overflow-wrap: anywhere; }
+.file-attachments { width: 100%; min-width: 0; padding: 12px 0; }
+.file-attachments ul { padding-left: 18px; overflow-wrap: anywhere; }
+.file-attachments li { margin-bottom: 8px; }
+input::placeholder, textarea::placeholder { color: var(--text-muted); }
+
+.data-table .numeric-column { text-align: right; font-variant-numeric: tabular-nums; }

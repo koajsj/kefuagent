@@ -22,31 +22,41 @@ from support_agent.tool_protocol import (
 router = APIRouter(tags=["Tool definitions and execution"])
 
 
+def binding(row, request):
+    from support_agent.services.tool_execution import bound_capability
+
+    _, reason = bound_capability(row, request.app.state.tool_registry)
+    return ToolOut.model_validate(row).model_copy(
+        update={"runtime_bound": reason is None, "binding_error": reason}
+    )
+
+
 @router.post("/tools", response_model=ToolOut, status_code=201)
 def register(data: ToolSpec, request: Request, db: Database, context: TenantAdmin):
-    return tools.register(db, context, data, request)
+    return binding(tools.register(db, context, data, request), request)
 
 
 @router.get("/tools", response_model=list[ToolOut])
 def list_tools(
+    request: Request,
     db: Database,
     context: TenantContext,
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    return list_owned(db, ToolDefinition, context, limit, offset)
+    return [binding(row, request) for row in list_owned(db, ToolDefinition, context, limit, offset)]
 
 
 @router.get("/tools/{tool_id}", response_model=ToolOut)
-def detail(tool_id: UUID, db: Database, context: TenantContext):
-    return get_owned(db, ToolDefinition, context, tool_id)
+def detail(tool_id: UUID, request: Request, db: Database, context: TenantContext):
+    return binding(get_owned(db, ToolDefinition, context, tool_id), request)
 
 
 @router.patch("/tools/{tool_id}", response_model=ToolOut)
 def set_enabled(
     tool_id: UUID, data: ToolPatch, request: Request, db: Database, context: TenantAdmin
 ):
-    return tools.set_enabled(db, context, tool_id, data, request)
+    return binding(tools.set_enabled(db, context, tool_id, data, request), request)
 
 
 @router.post("/tools/{tool_id}/validate", response_model=ToolResult)
@@ -83,6 +93,7 @@ def capabilities(request: Request, context: TenantAdmin):
             "parameters": c.parameters,
             "output_schema": c.output_schema,
             "execution_type": "read_only" if c.read_only else "write",
+            "minimum_risk": c.risk,
         }
         for c in request.app.state.tool_registry.items.values()
     ]

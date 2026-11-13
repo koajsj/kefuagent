@@ -19,6 +19,12 @@ import {
   collection,
   pager,
 } from "./ui.js";
+import { explain } from "./api.js";
+const documentNotice = (doc) => {
+  if (doc.status === "failed") return `文档处理失败：${explain(doc.error_category || "")} 请检查文档状态和原因。`;
+  if (doc.status === "ready") return "文档处理完成，请检查发布状态。";
+  return `文档当前状态：${doc.status || "未知"}，请查看文档列表。`;
+};
 const asJSON = (value) => {
   try {
     return JSON.parse(value || "{}");
@@ -489,11 +495,11 @@ export async function knowledgePage(ctx) {
             const file = values.get("file");
             if (file.size > 5 * 1024 * 1024)
               throw new Error("文件超过 5 MiB。");
-            await ctx.api(`/knowledge-bases/${base.id}/documents`, {
+            const doc = await ctx.api(`/knowledge-bases/${base.id}/documents`, {
               method: "POST",
               body: values,
             });
-            ctx.notify("文档已上传并处理，请检查处理状态。");
+            ctx.notify(documentNotice(doc));
             await open(base, offset);
           },
           "上传并解析",
@@ -520,9 +526,10 @@ export async function knowledgePage(ctx) {
                   admin(ctx)
                     ? button("重新处理", () =>
                         guard(ctx, async () => {
-                          await ctx.api(`/documents/${d.id}/reprocess`, {
+                          const updated = await ctx.api(`/documents/${d.id}/reprocess`, {
                             method: "POST",
                           });
+                          ctx.notify(documentNotice(updated));
                           await open(base, offset);
                         }),
                       )

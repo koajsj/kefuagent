@@ -1,4 +1,4 @@
-import { Button, Chip, Skeleton } from "@heroui/react";
+import { Button, Chip, Skeleton, Table } from "@heroui/react";
 import type { ReactNode } from "react";
 import {
   ArrowLeft,
@@ -71,45 +71,15 @@ export function Empty({ children }: { children: ReactNode }) {
     </div>
   );
 }
-export function DataTable({
-  columns,
-  rows,
-}: {
-  columns: string[];
-  rows: ReactNode[][];
-}) {
-  return (
-    <div className="table-wrap">
-      <table className="data-table">
-        <thead>
-          <tr>
-            {columns.map((c) => (
-              <th scope="col" key={c}>
-                {c}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {!rows.length && (
-            <tr>
-              <td colSpan={columns.length}>
-                <Empty>暂无可显示的记录。</Empty>
-              </td>
-            </tr>
-          )}
-          {rows.map((row, i) => (
-            <tr key={i}>
-              {row.map((cell, j) => (
-                <td key={j}>{cell}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
+export function DataTable({ columns, rows, numericColumns = [] }: { columns: string[]; rows: ReactNode[][]; numericColumns?: number[] }) {
+  return <Table className="table-wrap"><Table.ScrollContainer>
+    <Table.Content aria-label={columns.join("、")} className="data-table">
+      <Table.Header>{columns.map((column, index) => <Table.Column key={index} id={String(index)} isRowHeader={index === 0} className={numericColumns.includes(index) ? "numeric-column" : undefined}>{column}</Table.Column>)}</Table.Header>
+      <Table.Body renderEmptyState={() => <Empty>暂无可显示的记录。</Empty>}>{rows.map((row, index) => <Table.Row key={index} id={String(index)}>{row.map((cell, col) => <Table.Cell key={col} textValue={typeof cell === "string" || typeof cell === "number" ? String(cell) : columns[col]} className={numericColumns.includes(col) ? "numeric-column" : undefined}>{cell}</Table.Cell>)}</Table.Row>)}</Table.Body>
+    </Table.Content>
+  </Table.ScrollContainer></Table>;
 }
+
 export function Field({
   label,
   children,

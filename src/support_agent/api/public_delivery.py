@@ -15,9 +15,11 @@ from support_agent.public_schemas import (
     PublicInfo,
     PublicMessage,
     PublicRun,
+    VisitorMessageReceipt,
     VisitorOut,
     VisitorTurn,
 )
+from support_agent.security_schemas import BootstrapInput, BootstrapOut, VisitorStart
 from support_agent.services import public_delivery as delivery
 from support_agent.services.audit import record
 from support_agent.services.resources import get_owned, list_owned
@@ -66,8 +68,15 @@ def info(pid: UUID, request: Request, db: Database):
 
 
 @router.post("/public/{pid}/sessions", response_model=VisitorOut, status_code=201)
-def start(pid: UUID, request: Request, db: Database):
-    return delivery.start(db, pid, request)
+def start(pid: UUID, data: VisitorStart, request: Request, db: Database):
+    return delivery.start(db, pid, request, bootstrap_token=data.bootstrap_token)
+
+
+@router.post("/public/{pid}/bootstrap", response_model=BootstrapOut)
+def widget_bootstrap(pid: UUID, data: BootstrapInput, request: Request, db: Database):
+    from support_agent.services.widget_identity import bootstrap
+
+    return bootstrap(db, pid, data, request)
 
 
 def visitor(pid: UUID, sid: UUID, request: Request, db: Database):
@@ -77,9 +86,16 @@ def visitor(pid: UUID, sid: UUID, request: Request, db: Database):
 Visitor = Annotated[object, Depends(visitor)]
 
 
-@router.post("/public/{pid}/sessions/{sid}/turns", response_model=AgentTurnOut)
+@router.post(
+    "/public/{pid}/sessions/{sid}/turns", response_model=AgentTurnOut | VisitorMessageReceipt
+)
 def turn(data: VisitorTurn, request: Request, db: Database, context: Visitor):
     return delivery.turn(db, context, data, request)
+
+
+@router.post("/public/{pid}/sessions/{sid}/messages", response_model=VisitorMessageReceipt)
+def send_message(data: VisitorTurn, request: Request, db: Database, context: Visitor):
+    return delivery.visitor_message(db, context, data, request)
 
 
 @router.get("/public/{pid}/sessions/{sid}/messages", response_model=list[PublicMessage])
@@ -96,6 +112,7 @@ def history(
     rows = delivery.history(db, context, request, limit, offset, after=after, before=before)
     conversation = get_owned(db, Conversation, context, context.conversation_id)
     response.headers["X-Conversation-Status"] = conversation.status
+    response.headers["X-Support-State"] = conversation.support_state
     return rows
 
 

@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -11,6 +12,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -61,6 +63,7 @@ class User(Record, Base):
 
 class AuthSession(Record, Base):
     __tablename__ = "auth_sessions"
+    __table_args__ = (UniqueConstraint("user_id", "id", name="uq_auth_sessions_owner"),)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -112,6 +115,15 @@ class Conversation(Record, Timestamped, Base):
     __tablename__ = "conversations"
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
+        UniqueConstraint(
+            "tenant_id", "created_by", "idempotency_key", name="uq_conversations_create_request"
+        ),
+        CheckConstraint(
+            "(idempotency_key IS NULL AND input_digest IS NULL) OR "
+            "(idempotency_key IS NOT NULL AND input_digest IS NOT NULL "
+            "AND input_digest ~ '^[0-9a-f]{64}$')",
+            name="creation_request",
+        ),
         CheckConstraint("status IN ('open','closed')", name="status"),
         CheckConstraint(
             "support_state IN ('ai','waiting','human','resolved')", name="support_state"
@@ -135,6 +147,9 @@ class Conversation(Record, Timestamped, Base):
     channel: Mapped[str] = mapped_column(String(40))
     status: Mapped[str] = mapped_column(String(16), default="open", server_default="open")
     subject: Mapped[str] = mapped_column(String(160), default="新会话", server_default="新会话")
+    # Nullable only for historical rows and independently authenticated visitor creation.
+    idempotency_key: Mapped[UUID | None]
+    input_digest: Mapped[str | None] = mapped_column(String(64))
     support_state: Mapped[str] = mapped_column(String(16), default="ai", server_default="ai")
     assignee_id: Mapped[UUID | None]
     priority: Mapped[str] = mapped_column(String(16), default="normal", server_default="normal")
@@ -176,6 +191,11 @@ class AgentKnowledgeBase(Record, Base):
 class Message(Record, Base):
     __tablename__ = "messages"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "model_call_id"],
+            ["model_calls.tenant_id", "model_calls.conversation_id", "model_calls.id"],
+            name="fk_messages_call_conversation",
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "conversation_id"], ["conversations.tenant_id", "conversations.id"]
         ),
@@ -280,6 +300,7 @@ class Document(Record, Timestamped, Base):
     media_type: Mapped[str] = mapped_column(String(100))
     sha256: Mapped[str] = mapped_column(String(64))
     size_bytes: Mapped[int] = mapped_column(Integer)
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False, server_default="true")
     status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
     error_category: Mapped[str | None] = mapped_column(String(80))
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
@@ -292,7 +313,38 @@ class DocumentChunk(Record, Base):
     __tablename__ = "document_chunks"
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
-        UniqueConstraint("document_id", "position"),
+        UniqueConstraint(
+            "tenant_id",
+            "document_id",
+            "generation",
+            "position",
+            "id",
+            name="uq_document_chunks_version_identity",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "document_id",
+            "generation",
+            "root_chunk_id",
+            "revision",
+            name="uq_document_chunks_revision",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "document_id", "generation", "position", "root_chunk_id"],
+            [
+                "document_chunks.tenant_id",
+                "document_chunks.document_id",
+                "document_chunks.generation",
+                "document_chunks.position",
+                "document_chunks.id",
+            ],
+            name="fk_document_chunks_root",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "revised_by"],
+            ["tenant_memberships.tenant_id", "tenant_memberships.user_id"],
+            name="fk_document_chunks_editor",
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "document_id"],
             ["documents.tenant_id", "documents.id"],
@@ -300,6 +352,18 @@ class DocumentChunk(Record, Base):
         ),
         CheckConstraint("position >= 0 AND generation > 0", name="position"),
         CheckConstraint("page IS NULL OR page > 0", name="page"),
+        CheckConstraint(
+            "revision > 0 AND ((revision = 1) = (root_chunk_id = id))", name="revision"
+        ),
+        Index(
+            "ix_document_chunks_current",
+            "tenant_id",
+            "document_id",
+            "generation",
+            "position",
+            unique=True,
+            postgresql_where=text("is_current"),
+        ),
         Index("ix_document_chunks_search", "search_vector", postgresql_using="gin"),
         Index("ix_document_chunks_chinese", "chinese_vector", postgresql_using="gin"),
     )
@@ -307,6 +371,12 @@ class DocumentChunk(Record, Base):
     document_id: Mapped[UUID]
     position: Mapped[int] = mapped_column(Integer)
     generation: Mapped[int] = mapped_column(Integer)
+    root_chunk_id: Mapped[UUID]
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    revised_by: Mapped[UUID | None]
+    revision_reason: Mapped[str | None] = mapped_column(String(500))
     content: Mapped[str] = mapped_column(Text)
     page: Mapped[int | None] = mapped_column(Integer)
     section: Mapped[str | None] = mapped_column(String(200))
@@ -333,6 +403,20 @@ class ModelCall(Record, Timestamped, Base):
     __tablename__ = "model_calls"
     visitor_session_id: Mapped[UUID | None]
     __table_args__ = (
+        UniqueConstraint("tenant_id", "conversation_id", "id", name="uq_model_calls_conversation"),
+        UniqueConstraint("tenant_id", "agent_config_id", "id", name="uq_model_calls_agent"),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "visitor_session_id"],
+            [
+                "visitor_sessions.tenant_id",
+                "visitor_sessions.conversation_id",
+                "visitor_sessions.id",
+            ],
+            name="fk_model_calls_visitor_conversation",
+        ),
+        CheckConstraint(
+            "visitor_session_id IS NULL OR conversation_id IS NOT NULL", name="visitor_conversation"
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "visitor_session_id"],
             ["visitor_sessions.tenant_id", "visitor_sessions.id"],
@@ -351,7 +435,10 @@ class ModelCall(Record, Timestamped, Base):
         CheckConstraint(
             "status IN ('running','answered','unresolved','failed','connected')", name="status"
         ),
-        CheckConstraint("kind IN ('chat','connection_test','agent','tool_execution')", name="kind"),
+        CheckConstraint(
+            "kind IN ('chat','connection_test','agent','tool_execution','embedding','search','draft')",
+            name="kind",
+        ),
         CheckConstraint(
             "(input_tokens IS NULL OR input_tokens >= 0) AND (output_tokens IS NULL OR output_tokens >= 0) AND attempts >= 0",
             name="usage",
@@ -417,6 +504,17 @@ class AgentTool(Record, Timestamped, Base):
 class ToolExecution(Record, Base):
     __tablename__ = "tool_executions"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "model_call_id"],
+            ["model_calls.tenant_id", "model_calls.conversation_id", "model_calls.id"],
+            name="fk_tool_executions_call_conversation",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "agent_config_id", "model_call_id"],
+            ["model_calls.tenant_id", "model_calls.agent_config_id", "model_calls.id"],
+            name="fk_tool_executions_call_agent",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_tool_executions_tenant_identity"),
         UniqueConstraint("tenant_id", "model_call_id", "tool_call_id"),
         ForeignKeyConstraint(
             ["tenant_id", "agent_config_id"], ["agent_configs.tenant_id", "agent_configs.id"]
@@ -461,6 +559,7 @@ class PublicRoute(Record, Base):
     """Minimal public locator only; all delivery/configuration data stays behind RLS."""
 
     __tablename__ = "public_routes"
+    __table_args__ = (UniqueConstraint("tenant_id", "id"),)
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
 
 
@@ -469,13 +568,16 @@ class Publication(Record, Timestamped, Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         ForeignKeyConstraint(
+            ["tenant_id", "id"],
+            ["public_routes.tenant_id", "public_routes.id"],
+            name="fk_publications_tenant_route",
+        ),
+        ForeignKeyConstraint(
             ["tenant_id", "agent_config_id"], ["agent_configs.tenant_id", "agent_configs.id"]
         ),
         CheckConstraint("version >= 1 AND agent_version >= 1", name="version"),
     )
-    id: Mapped[UUID] = mapped_column(
-        ForeignKey("public_routes.id"), primary_key=True, default=uuid4
-    )
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), index=True)
     agent_config_id: Mapped[UUID]
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
@@ -490,6 +592,12 @@ class Publication(Record, Timestamped, Base):
 class VisitorSession(Record, Base):
     __tablename__ = "visitor_sessions"
     __table_args__ = (
+        UniqueConstraint("tenant_id", "conversation_id", "id", name="uq_visitor_sessions_scope"),
+        ForeignKeyConstraint(
+            ["tenant_id", "publication_id", "site_id"],
+            ["widget_sites.tenant_id", "widget_sites.publication_id", "widget_sites.id"],
+            name="fk_visitor_sessions_publication_site",
+        ),
         UniqueConstraint("tenant_id", "id", name="uq_visitor_sessions_identity"),
         UniqueConstraint("tenant_id", "conversation_id", name="uq_visitor_sessions_conversation"),
         ForeignKeyConstraint(
@@ -498,6 +606,9 @@ class VisitorSession(Record, Base):
         ForeignKeyConstraint(
             ["tenant_id", "conversation_id"], ["conversations.tenant_id", "conversations.id"]
         ),
+        ForeignKeyConstraint(
+            ["tenant_id", "site_id"], ["widget_sites.tenant_id", "widget_sites.id"]
+        ),
         CheckConstraint("turn_count >= 0", name="turn_count"),
         Index("ix_visitor_sessions_rate", "tenant_id", "publication_id", "ip_hash", "created_at"),
     )
@@ -505,6 +616,8 @@ class VisitorSession(Record, Base):
     publication_id: Mapped[UUID]
     publication_version: Mapped[int] = mapped_column(Integer)
     conversation_id: Mapped[UUID]
+    site_id: Mapped[UUID | None]
+    site_version: Mapped[int | None] = mapped_column(Integer)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
     ip_hash: Mapped[str] = mapped_column(String(64))
     turn_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
@@ -534,6 +647,12 @@ class Collaboration(Record, Base):
 class ConversationSummary(Record, Base):
     __tablename__ = "conversation_summaries"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "model_call_id"],
+            ["model_calls.tenant_id", "model_calls.conversation_id", "model_calls.id"],
+            name="fk_conversation_summaries_call_conversation",
+            ondelete="CASCADE",
+        ),
         UniqueConstraint("tenant_id", "conversation_id", "version"),
         ForeignKeyConstraint(
             ["tenant_id", "conversation_id"],
@@ -574,6 +693,16 @@ class ConversationSummary(Record, Base):
 class VisitorFeedback(Record, Timestamped, Base):
     __tablename__ = "visitor_feedback"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "visitor_session_id"],
+            [
+                "visitor_sessions.tenant_id",
+                "visitor_sessions.conversation_id",
+                "visitor_sessions.id",
+            ],
+            name="fk_visitor_feedback_session_conversation",
+            ondelete="CASCADE",
+        ),
         UniqueConstraint("tenant_id", "visitor_session_id"),
         ForeignKeyConstraint(
             ["tenant_id", "conversation_id"],
@@ -647,4 +776,528 @@ class UserMemory(Record, Timestamped, Base):
     source_conversation_id: Mapped[UUID]
     source_message_id: Mapped[UUID]
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ConversationReadCursor(Record, Timestamped, Base):
+    __tablename__ = "conversation_read_cursors"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "conversation_id", "user_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "message_id"],
+            ["messages.tenant_id", "messages.conversation_id", "messages.id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id"],
+            ["tenant_memberships.tenant_id", "tenant_memberships.user_id"],
+            ondelete="CASCADE",
+        ),
+    )
+    tenant_id: Mapped[UUID]
+    conversation_id: Mapped[UUID]
+    user_id: Mapped[UUID]
+    message_id: Mapped[UUID]
+
+
+class Customer(Record, Timestamped, Base):
+    __tablename__ = "customers"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_customers_tenant_identity"),
+        UniqueConstraint("tenant_id", "external_ref", name="uq_customers_external_ref"),
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_customers_request_key"),
+        CheckConstraint("version > 0", name="version"),
+        CheckConstraint("status IN ('active','archived')", name="status"),
+        Index("ix_customers_tenant_updated", "tenant_id", "updated_at", "id"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    name: Mapped[str] = mapped_column(String(120))
+    external_ref: Mapped[str | None] = mapped_column(String(160))
+    email: Mapped[str | None] = mapped_column(String(254))
+    phone: Mapped[str | None] = mapped_column(String(40))
+    tags: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    notes: Mapped[str] = mapped_column(Text, default="", server_default="")
+    status: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
+    memory_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    idempotency_key: Mapped[UUID]
+    input_digest: Mapped[str] = mapped_column(String(64))
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+
+
+class ConversationCustomer(Record, Base):
+    __tablename__ = "conversation_customers"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "conversation_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"], ["conversations.tenant_id", "conversations.id"]
+        ),
+        ForeignKeyConstraint(["tenant_id", "customer_id"], ["customers.tenant_id", "customers.id"]),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    conversation_id: Mapped[UUID]
+    customer_id: Mapped[UUID]
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+
+
+class Ticket(Record, Timestamped, Base):
+    __tablename__ = "tickets"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_tickets_tenant_identity"),
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_tickets_request_key"),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"], ["conversations.tenant_id", "conversations.id"]
+        ),
+        ForeignKeyConstraint(["tenant_id", "customer_id"], ["customers.tenant_id", "customers.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "assignee_id"],
+            ["tenant_memberships.tenant_id", "tenant_memberships.user_id"],
+        ),
+        CheckConstraint("version > 0", name="version"),
+        CheckConstraint("status IN ('open','in_progress','resolved','closed')", name="status"),
+        CheckConstraint("priority IN ('low','normal','high','urgent')", name="priority"),
+        Index("ix_tickets_queue", "tenant_id", "status", "due_at", "id"),
+        Index("ix_tickets_customer", "tenant_id", "customer_id", "created_at"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    conversation_id: Mapped[UUID | None]
+    customer_id: Mapped[UUID | None]
+    assignee_id: Mapped[UUID | None]
+    title: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="open", server_default="open")
+    priority: Mapped[str] = mapped_column(String(16), default="normal", server_default="normal")
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    idempotency_key: Mapped[UUID]
+    input_digest: Mapped[str] = mapped_column(String(64))
+
+
+class TicketEvent(Record, Base):
+    __tablename__ = "ticket_events"
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id", "ticket_id"], ["tickets.tenant_id", "tickets.id"]),
+        Index("ix_ticket_events_history", "tenant_id", "ticket_id", "created_at", "id"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    ticket_id: Mapped[UUID]
+    actor_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    action: Mapped[str] = mapped_column(String(32))
+    details: Mapped[dict] = mapped_column(JSONB)
+
+
+class StaffNotification(Record, Base):
+    __tablename__ = "staff_notifications"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "ticket_id", "user_id", "ticket_version", "kind"),
+        ForeignKeyConstraint(["tenant_id", "ticket_id"], ["tickets.tenant_id", "tickets.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id"], ["tenant_memberships.tenant_id", "tenant_memberships.user_id"]
+        ),
+        Index("ix_staff_notifications_inbox", "tenant_id", "user_id", "created_at", "id"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    user_id: Mapped[UUID]
+    ticket_id: Mapped[UUID]
+    ticket_version: Mapped[int] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(String(32))
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ConversationAttachment(Record, Base):
+    __tablename__ = "conversation_attachments"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "visitor_session_id"],
+            [
+                "visitor_sessions.tenant_id",
+                "visitor_sessions.conversation_id",
+                "visitor_sessions.id",
+            ],
+            name="fk_conversation_attachments_visitor_conversation",
+        ),
+        UniqueConstraint("tenant_id", "id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"], ["conversations.tenant_id", "conversations.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "visitor_session_id"],
+            ["visitor_sessions.tenant_id", "visitor_sessions.id"],
+        ),
+        CheckConstraint("status IN ('pending','ready','failed')", name="status"),
+        CheckConstraint("size_bytes > 0 AND size_bytes <= 5242880", name="size"),
+        Index(
+            "ix_conversation_attachments_history",
+            "tenant_id",
+            "conversation_id",
+            "created_at",
+            "id",
+        ),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    conversation_id: Mapped[UUID]
+    visitor_session_id: Mapped[UUID | None]
+    created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    filename: Mapped[str] = mapped_column(String(200))
+    media_type: Mapped[str] = mapped_column(String(100))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
+    public: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+
+
+class CustomerMemory(Record, Timestamped, Base):
+    __tablename__ = "customer_memories"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_customer_memories_tenant_identity"),
+        UniqueConstraint(
+            "tenant_id",
+            "customer_id",
+            "source_message_id",
+            "digest",
+            name="uq_customer_memories_source_digest",
+        ),
+        ForeignKeyConstraint(["tenant_id", "customer_id"], ["customers.tenant_id", "customers.id"]),
+        ForeignKeyConstraint(
+            ["tenant_id", "source_conversation_id", "source_message_id"],
+            ["messages.tenant_id", "messages.conversation_id", "messages.id"],
+        ),
+        CheckConstraint("version > 0", name="version"),
+        Index("ix_customer_memories_lifecycle", "tenant_id", "customer_id", "expires_at", "id"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    customer_id: Mapped[UUID]
+    source_conversation_id: Mapped[UUID]
+    source_message_id: Mapped[UUID]
+    confirmed_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    content: Mapped[str | None] = mapped_column(Text)
+    digest: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+
+
+class ErasureRequest(Record, Timestamped, Base):
+    __tablename__ = "erasure_requests"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "subject_type", "subject_id"),
+        CheckConstraint("subject_type IN ('user','customer','conversation')", name="subject_type"),
+        CheckConstraint(
+            "status IN ('REQUESTED','ACCESS_BLOCKED','DEPENDENCY_CHECK','PURGING','PURGED','BLOCKED')",
+            name="status",
+        ),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    requested_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    subject_type: Mapped[str] = mapped_column(String(16))
+    subject_id: Mapped[UUID]
+    status: Mapped[str] = mapped_column(String(24), default="REQUESTED")
+    attempts: Mapped[int] = mapped_column(Integer, default=1)
+    assessment: Mapped[dict] = mapped_column(JSONB)
+
+
+class ToolApproval(Record, Timestamped, Base):
+    __tablename__ = "tool_approvals"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_tool_approvals_tenant_identity"),
+        UniqueConstraint(
+            "tenant_id", "requested_by", "idempotency_key", name="uq_tool_approvals_request_key"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"], ["conversations.tenant_id", "conversations.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "agent_config_id"], ["agent_configs.tenant_id", "agent_configs.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "tool_id"], ["tool_definitions.tenant_id", "tool_definitions.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "execution_id"], ["tool_executions.tenant_id", "tool_executions.id"]
+        ),
+        CheckConstraint(
+            "status IN ('PENDING_APPROVAL','APPROVED','REJECTED','EXPIRED','REVOKED','EXECUTED')",
+            name="status",
+        ),
+        CheckConstraint("decided_by IS NULL OR decided_by <> requested_by", name="separation"),
+        Index("ix_tool_approvals_queue", "tenant_id", "status", "expires_at"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    requested_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    decided_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    conversation_id: Mapped[UUID]
+    agent_config_id: Mapped[UUID]
+    tool_id: Mapped[UUID]
+    idempotency_key: Mapped[UUID]
+    status: Mapped[str] = mapped_column(String(24), default="PENDING_APPROVAL")
+    payload_digest: Mapped[str] = mapped_column(String(64))
+    encrypted_arguments: Mapped[str] = mapped_column(Text)
+    binding: Mapped[dict] = mapped_column(JSONB)
+    reason: Mapped[str | None] = mapped_column(String(1000))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    execution_id: Mapped[UUID | None] = mapped_column(unique=True)
+
+
+class BudgetPolicy(Record, Timestamped, Base):
+    __tablename__ = "budget_policies"
+    __table_args__ = (
+        UniqueConstraint("tenant_id"),
+        CheckConstraint(
+            "run_limit >= 0 AND daily_limit >= 0 AND monthly_limit >= 0 AND total_limit >= 0",
+            name="limits",
+        ),
+        CheckConstraint("version > 0", name="version"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    currency: Mapped[str] = mapped_column(String(3))
+    run_limit: Mapped[Decimal] = mapped_column(Numeric(24, 12))
+    daily_limit: Mapped[Decimal] = mapped_column(Numeric(24, 12))
+    monthly_limit: Mapped[Decimal] = mapped_column(Numeric(24, 12))
+    total_limit: Mapped[Decimal] = mapped_column(Numeric(24, 12))
+    agent_limits: Mapped[dict] = mapped_column(JSONB, default=dict)
+    price_catalog_digest: Mapped[str] = mapped_column(String(64))
+
+
+class CostReservation(Record, Base):
+    __tablename__ = "cost_reservations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "agent_config_id", "model_call_id"],
+            ["model_calls.tenant_id", "model_calls.agent_config_id", "model_calls.id"],
+            name="fk_cost_reservations_call_agent",
+        ),
+        UniqueConstraint("tenant_id", "model_call_id", "step_index"),
+        ForeignKeyConstraint(
+            ["tenant_id", "model_call_id"], ["model_calls.tenant_id", "model_calls.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "agent_config_id"], ["agent_configs.tenant_id", "agent_configs.id"]
+        ),
+        CheckConstraint("reserved >= 0 AND charged >= 0", name="amounts"),
+        CheckConstraint(
+            "status IN ('RESERVED','SETTLED','RELEASED','UNKNOWN','OVERRUN')", name="status"
+        ),
+        Index("ix_cost_reservations_accounting", "tenant_id", "created_at", "status"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    model_call_id: Mapped[UUID]
+    agent_config_id: Mapped[UUID]
+    step_index: Mapped[int] = mapped_column(Integer)
+    policy_version: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    reserved: Mapped[Decimal] = mapped_column(Numeric(24, 12))
+    charged: Mapped[Decimal] = mapped_column(Numeric(24, 12))
+    pricing: Mapped[dict] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(16), default="RESERVED")
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WidgetSite(Record, Timestamped, Base):
+    __tablename__ = "widget_sites"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "publication_id", "id", name="uq_widget_sites_publication"),
+        UniqueConstraint("tenant_id", "id", name="uq_widget_sites_tenant_identity"),
+        UniqueConstraint(
+            "tenant_id", "publication_id", "origin", name="uq_widget_sites_publication_origin"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "publication_id"], ["publications.tenant_id", "publications.id"]
+        ),
+        CheckConstraint("version > 0", name="version"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    publication_id: Mapped[UUID]
+    origin: Mapped[str] = mapped_column(String(300))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    challenge_hash: Mapped[str] = mapped_column(String(64))
+    challenge_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    verification_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    encrypted_secret: Mapped[str] = mapped_column(Text)
+
+
+class WidgetBootstrap(Record, Base):
+    __tablename__ = "widget_bootstraps"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "site_id", "nonce"),
+        ForeignKeyConstraint(
+            ["tenant_id", "site_id"], ["widget_sites.tenant_id", "widget_sites.id"]
+        ),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    site_id: Mapped[UUID]
+    site_version: Mapped[int] = mapped_column(Integer)
+    publication_version: Mapped[int] = mapped_column(Integer)
+    nonce: Mapped[UUID]
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class KnowledgeIndex(Record, Timestamped, Base):
+    __tablename__ = "knowledge_indexes"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["requested_by", "auth_session_id"],
+            ["auth_sessions.user_id", "auth_sessions.id"],
+            name="fk_knowledge_indexes_request_session",
+        ),
+        UniqueConstraint("tenant_id", "id", name="uq_knowledge_indexes_tenant_identity"),
+        UniqueConstraint("tenant_id", "knowledge_base_id", name="uq_knowledge_indexes_base"),
+        ForeignKeyConstraint(
+            ["tenant_id", "knowledge_base_id"], ["knowledge_bases.tenant_id", "knowledge_bases.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "agent_config_id"], ["agent_configs.tenant_id", "agent_configs.id"]
+        ),
+        CheckConstraint("state IN ('DISABLED','QUEUED','RUNNING','READY','FAILED')", name="state"),
+        CheckConstraint("version > 0", name="version"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    knowledge_base_id: Mapped[UUID]
+    agent_config_id: Mapped[UUID]
+    requested_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    auth_session_id: Mapped[UUID] = mapped_column(ForeignKey("auth_sessions.id"))
+    model: Mapped[str] = mapped_column(String(120))
+    endpoint: Mapped[str] = mapped_column(String(500))
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    rerank: Mapped[bool] = mapped_column(Boolean, default=False)
+    state: Mapped[str] = mapped_column(String(16), default="DISABLED")
+    error_category: Mapped[str | None] = mapped_column(String(80))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[UUID | None]
+
+
+class ChunkEmbedding(Record, Base):
+    __tablename__ = "chunk_embeddings"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "index_id", "chunk_id", name="uq_chunk_embeddings_source"),
+        ForeignKeyConstraint(
+            ["tenant_id", "index_id"], ["knowledge_indexes.tenant_id", "knowledge_indexes.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "chunk_id"], ["document_chunks.tenant_id", "document_chunks.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "model_call_id"], ["model_calls.tenant_id", "model_calls.id"]
+        ),
+        Index(
+            "ix_chunk_embeddings_cosine",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
+    from support_agent.vector_type import Vector
+
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    index_id: Mapped[UUID]
+    chunk_id: Mapped[UUID]
+    model_call_id: Mapped[UUID]
+    index_version: Mapped[int] = mapped_column(Integer)
+    content_digest: Mapped[str] = mapped_column(String(64))
+    embedding: Mapped[list] = mapped_column(Vector())
+
+
+class CustomerExport(Record, Timestamped, Base):
+    __tablename__ = "customer_exports"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["requested_by", "auth_session_id"],
+            ["auth_sessions.user_id", "auth_sessions.id"],
+            name="fk_customer_exports_request_session",
+        ),
+        UniqueConstraint(
+            "tenant_id", "requested_by", "request_key", name="uq_customer_exports_request"
+        ),
+        ForeignKeyConstraint(["tenant_id", "customer_id"], ["customers.tenant_id", "customers.id"]),
+        CheckConstraint(
+            "status IN ('REQUESTED','BUILDING','READY','FAILED','EXPIRED','CLEANUP_BLOCKED','DELETED')",
+            name="status",
+        ),
+        Index("ix_customer_exports_queue", "tenant_id", "status", "expires_at"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    customer_id: Mapped[UUID]
+    requested_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    auth_session_id: Mapped[UUID] = mapped_column(ForeignKey("auth_sessions.id"))
+    request_key: Mapped[UUID]
+    status: Mapped[str] = mapped_column(String(24), default="REQUESTED")
+    scope: Mapped[dict] = mapped_column(JSONB)
+    scope_digest: Mapped[str] = mapped_column(String(64))
+    parts: Mapped[list] = mapped_column(JSONB, default=list)
+    manifest: Mapped[dict] = mapped_column(JSONB, default=dict)
+    error_category: Mapped[str | None] = mapped_column(String(80))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[UUID | None]
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ReplyDraft(Record, Timestamped, Base):
+    __tablename__ = "reply_drafts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["requested_by", "auth_session_id"],
+            ["auth_sessions.user_id", "auth_sessions.id"],
+            name="fk_reply_drafts_request_session",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "model_call_id"],
+            ["model_calls.tenant_id", "model_calls.conversation_id", "model_calls.id"],
+            name="fk_reply_drafts_call_conversation",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "agent_config_id", "model_call_id"],
+            ["model_calls.tenant_id", "model_calls.agent_config_id", "model_calls.id"],
+            name="fk_reply_drafts_call_agent",
+        ),
+        UniqueConstraint(
+            "tenant_id", "requested_by", "request_key", name="uq_reply_drafts_request"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id"], ["conversations.tenant_id", "conversations.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "agent_config_id"], ["agent_configs.tenant_id", "agent_configs.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "model_call_id"], ["model_calls.tenant_id", "model_calls.id"]
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "conversation_id", "sent_message_id"],
+            ["messages.tenant_id", "messages.conversation_id", "messages.id"],
+        ),
+        CheckConstraint(
+            "status IN ('DRAFT','GENERATING','GENERATED','EDITED','ACCEPTED','REJECTED','EXPIRED')",
+            name="status",
+        ),
+        CheckConstraint("version > 0", name="version"),
+        Index("ix_reply_drafts_queue", "tenant_id", "status", "created_at"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    conversation_id: Mapped[UUID]
+    agent_config_id: Mapped[UUID]
+    requested_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    auth_session_id: Mapped[UUID] = mapped_column(ForeignKey("auth_sessions.id"))
+    request_key: Mapped[UUID]
+    model_call_id: Mapped[UUID | None]
+    status: Mapped[str] = mapped_column(String(16), default="DRAFT")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    context_digest: Mapped[str] = mapped_column(String(64))
+    content: Mapped[str] = mapped_column(Text, default="")
+    original_content: Mapped[str] = mapped_column(Text, default="")
+    citations: Mapped[list] = mapped_column(JSONB, default=list)
+    warnings: Mapped[list] = mapped_column(JSONB, default=list)
+    feedback: Mapped[str | None] = mapped_column(String(1000))
+    sent_message_id: Mapped[UUID | None]
+    error_category: Mapped[str | None] = mapped_column(String(80))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -3,6 +3,7 @@ from dataclasses import replace
 from jsonschema import Draft202012Validator
 from sqlalchemy import select
 
+from support_agent.dependencies import locked_staff_context
 from support_agent.errors import AppError, forbidden
 from support_agent.models import AgentConfig, AgentTool, Conversation, ToolDefinition
 from support_agent.services.audit import record
@@ -11,6 +12,7 @@ from support_agent.tool_protocol import ToolResult
 
 
 def register(db, context, data, request):
+    context = locked_staff_context(db, context, request, admin=True)
     tool = ToolDefinition(
         **data.model_dump(), tenant_id=context.tenant_id, created_by=context.user_id
     )
@@ -21,6 +23,7 @@ def register(db, context, data, request):
 
 
 def set_enabled(db, context, tool_id, data, request):
+    context = locked_staff_context(db, context, request, admin=True)
     tool = get_owned(db, ToolDefinition, context, tool_id, lock=True)
     tool.enabled = data.enabled
     db.flush()
@@ -88,6 +91,7 @@ def execute(db, context, tool_id, data, request):
 
 
 def grant(db, context, config_id, tool_id, data, request):
+    context = locked_staff_context(db, context, request, admin=True)
     get_owned(db, AgentConfig, context, config_id, lock=True)
     get_owned(db, ToolDefinition, context, tool_id)
     row = db.scalar(

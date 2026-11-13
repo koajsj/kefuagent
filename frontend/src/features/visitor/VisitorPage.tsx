@@ -1,5 +1,8 @@
+import { websiteBootstrap } from "./bootstrap";
+import { FileAttachments } from "../../components/FileAttachments";
 import { Button } from "@heroui/react";
 import { useEffect, useRef, useState } from "react";
+import { useThreadScroll } from "../../hooks/useThreadScroll";
 import { adapter } from "../../adapters";
 import { requestIdentity } from "../../adapters/identity";
 import { sessionState } from "../../adapters/storage";
@@ -10,7 +13,7 @@ export function VisitorPage({ publicationId }: { publicationId: string }) {
   return <Visitor key={publicationId} publicationId={publicationId} />;
 }
 function Visitor({ publicationId: pid }: { publicationId: string }) {
-  const key = "support.visitor." + pid;
+  const key = "support.visitor." + pid + "." + (new URL(location.href).searchParams.get("site") || "demo");
   const stored = useRef<any>(
     (() => {
       try {
@@ -35,9 +38,10 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
     [feedback, setFeedback] = useState(""),
     [busy, setBusy] = useState(false),
     [closed, setClosed] = useState(false),
-    [content, setContent] = useState(""),
+    [content, setContent] = useState(() => sessionState.get(key + ".draft") || ""),
     [preview, setPreview] = useState(""),
     [phase, setPhase] = useState(""),
+    [supportState, setSupportState] = useState(""),
     [newMessages, setNewMessages] = useState(false),
     [rating, setRating] = useState<Row | null>(null),
     [ratingValue, setRatingValue] = useState("satisfied"),
@@ -51,7 +55,13 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
     life = useRef(new AbortController()),
     latest = useRef<string | null>(null),
     historyEpoch = useRef(0),
+    historyInFlight = useRef(false),
     current = useRef({ offset, busy, closed });
+  useEffect(() => {
+    const draftKey = key + ".draft";
+    if (content) sessionState.set(draftKey, content); else sessionState.remove(draftKey);
+  }, [pid, content]);
+  const scroll = useThreadScroll(messages, offset, loading);
   sessionRef.current = session;
   current.current = { offset, busy, closed };
   function save(next: Row | null, p = pending.current) {
@@ -70,6 +80,7 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
     setRating(null);
     setRatingLoaded(false);
     setPreview("");
+    setSupportState("");
   }
   function fail(e: any) {
     if (["AbortError", "StaleResponse"].includes(e.name)) return;
@@ -94,11 +105,13 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
       visitorToken: requestSession?.token,
       onHeaders: (headers) => {
         options.onHeaders?.(headers);
-        if (
-          sessionRef.current === requestSession &&
-          headers.get("X-Conversation-Status") === "closed"
-        )
-          current.current.closed = true;
+        const support = headers.get("X-Support-State");
+        if (sessionRef.current === requestSession && support) setSupportState(support);
+        const status = headers.get("X-Conversation-Status");
+        if (sessionRef.current === requestSession && (status === "open" || status === "closed")) {
+          current.current.closed = status === "closed";
+          setClosed(status === "closed");
+        }
       },
       onEvent: options.onEvent
         ? (event, value) => {
@@ -175,6 +188,7 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
     if (!session || !info) return;
     const ctrl = new AbortController();
     const ticket = ++historyEpoch.current;
+    historyInFlight.current = true;
     setLoading(true);
     api<Row[]>(`/sessions/${session.id}/messages?limit=50&offset=${offset}`, {
       signal: ctrl.signal,
@@ -192,12 +206,12 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
         if (!ctrl.signal.aborted) fail(e);
       })
       .finally(() => {
-        if (!ctrl.signal.aborted) setLoading(false);
+        if (!ctrl.signal.aborted) { historyInFlight.current = false; setLoading(false); }
       });
-    return () => ctrl.abort();
+    return () => { ctrl.abort(); historyInFlight.current = false; };
   }, [session?.id, info, offset, historyReload]);
   useEffect(() => {
-    if (!session || !info || closed) return;
+    if (!session || !info) return;
     let stopped = false,
       paused = false,
       failures = 0,
@@ -208,8 +222,7 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
       !stopped &&
       !paused &&
       !document.hidden &&
-      sessionRef.current?.id === session.id &&
-      !current.current.closed;
+      sessionRef.current?.id === session.id;
     const schedule = (delay = 5000) => {
       clearTimeout(timer);
       if (active()) timer = setTimeout(poll, delay);
@@ -220,7 +233,7 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
       const request = new AbortController();
       ctrl = request;
       try {
-        if (!current.current.busy) {
+        if (!current.current.busy && !historyInFlight.current) {
           const anchor = latest.current,
             ticket = historyEpoch.current;
           const rows = await api<Row[]>(
@@ -247,7 +260,7 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
                     ]
                   : rows,
               );
-            else setNewMessages(true);
+            setNewMessages(current.current.offset !== 0 || !scroll.nearBottom.current);
           }
         }
         if (current.current.closed) setClosed(true);
@@ -269,7 +282,7 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
         }
       } finally {
         inFlight = false;
-        schedule(Math.min(60000, 5000 * 2 ** failures));
+        schedule(Math.min(60000, (current.current.closed ? 30000 : 5000) * 2 ** failures));
       }
     }
     const hide = () => {
@@ -303,13 +316,13 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
       window.removeEventListener("pagehide", pagehide);
       window.removeEventListener("pageshow", pageshow);
     };
-  }, [session?.id, info, closed]);
+  }, [session?.id, info]);
   async function start() {
     if (busy || fatal) return;
     setBusy(true);
     setError("");
     try {
-      const next = await api<Row>("/sessions", { method: "POST" });
+      const next = await api<Row>("/sessions", { method: "POST", body: { bootstrap_token: await websiteBootstrap(pid) } });
       pending.current = null;
       sessionRef.current = next;
       setSession(next);
@@ -334,7 +347,7 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
       reset();
       setContent("");
       if (restart) {
-        const next = await api<Row>("/sessions", { method: "POST" });
+        const next = await api<Row>("/sessions", { method: "POST", body: { bootstrap_token: await websiteBootstrap(pid) } });
         sessionRef.current = next;
         setSession(next);
         setOffset(0);
@@ -348,23 +361,25 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
   }
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (busy || !session || closed || !content.trim()) return;
+    if (busy || !session || closed || !supportState || !content.trim()) return;
     const submitted = content.trim();
     setBusy(true);
     setError("");
     setFeedback("");
     setPreview("");
     try {
-      pending.current = await requestIdentity(
-        { content: submitted },
-        pending.current,
-      );
+      const identity = await requestIdentity({ content: submitted }, pending.current);
       if (life.current.signal.aborted) return;
+      const mode = identity.key === pending.current?.key && pending.current?.mode
+        ? pending.current.mode
+        : ["waiting", "human"].includes(supportState) ? "human" : "ai";
+      const manual = mode === "human";
+      pending.current = { ...identity, mode };
       save(session);
-      const result = await api<any>(`/sessions/${session.id}/turns/stream`, {
+      const result = await api<any>(`/sessions/${session.id}/${manual ? "messages" : "turns/stream"}`, {
         method: "POST",
         body: { content: submitted, idempotency_key: pending.current.key },
-        onEvent: (event, value) => {
+        onEvent: manual ? undefined : (event, value) => {
           if (event === "stage") setPhase(phases[value.phase] || value.phase);
           if (event === "delta") setPreview((old) => old + value.text);
           if (event === "discard") setPreview("");
@@ -377,19 +392,27 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
         setPreview("");
       }
       setFeedback(
-        result.status === "failed"
-          ? "回复失败：" + explain(result.error_category)
-          : result.status === "running"
-            ? "请求仍在执行。请稍后刷新消息或重试相同问题。"
-            : result.status === "unresolved"
-              ? "资料不足以确认，请补充问题或联系企业。"
-              : "已收到客服回复。",
+        result.status === "received"
+          ? "消息已发送，等待人工客服回复。"
+          : result.status === "failed"
+            ? "回复失败：" + explain(result.error_category)
+            : result.status === "running"
+              ? "请求仍在执行。请稍后刷新消息或重试相同问题。"
+              : result.status === "unresolved"
+                ? "资料不足以确认，请补充问题或联系企业。"
+                : "已收到客服回复。",
       );
-      setOffset(0);
-      setHistoryReload((v) => v + 1);
-      await runtime();
-    } catch (e) {
+      if (offset === 0) setHistoryReload((v) => v + 1);
+      else setNewMessages(true);
+      if (result.status === "received") setPhase("等待人工客服回复");
+      else await runtime();
+    } catch (e: any) {
+      if (["human_handling_active", "human_handling_required"].includes(e.code)) {
+        pending.current = null;
+        save(session, null);
+      }
       fail(e);
+      setHistoryReload((v) => v + 1);
     } finally {
       if (!life.current.signal.aborted) setBusy(false);
     }
@@ -479,10 +502,10 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
               结束会话
             </Button>
           </div>
-          {loading ? (
+          {loading && !messages.length ? (
             <p>正在加载消息…</p>
           ) : (
-            <div className="thread" role="log" aria-label="会话消息">
+            <div className="thread" ref={scroll.thread} onScroll={scroll.onScroll} role="log" aria-label="会话消息">
               {messages.length ? (
                 messages.map((m) => <Message key={m.id} message={m} visitor />)
               ) : (
@@ -500,7 +523,9 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
             <Button
               variant="secondary"
               onPress={() => {
+                scroll.jumpToLatest();
                 setOffset(0);
+                setNewMessages(false);
                 setHistoryReload((v) => v + 1);
               }}
             >
@@ -508,6 +533,7 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
             </Button>
           )}
           {closed && <p className="note">会话已结束，可查看历史或重新开始。</p>}
+          {session && <FileAttachments key={session.id} api={adapter} prefix={`/public/${pid}/sessions/${session.id}`} visitorToken={session.token} disabled={closed || busy} />}
           <form className="composer" onSubmit={submit}>
             <label>
               您的问题
@@ -529,7 +555,7 @@ function Visitor({ publicationId: pid }: { publicationId: string }) {
                 variant="primary"
                 className="primary"
                 type="submit"
-                isDisabled={busy || closed}
+                isDisabled={busy || closed || !supportState}
               >
                 {busy ? "正在发送…" : "发送"}
               </Button>

@@ -77,6 +77,10 @@ def record_failure(db: Session, request, reason: str):
     resource_type = "request"
     resource_id = None
     for field, kind in [
+        ("kid", "knowledge_base"),
+        ("cid", "customer" if path.startswith("/api/v1/customers/") else "conversation"),
+        ("eid", "customer_export"),
+        ("did", "reply_draft"),
         ("execution_id", "tool_execution"),
         ("document_id", "document"),
         ("knowledge_base_id", "knowledge_base"),

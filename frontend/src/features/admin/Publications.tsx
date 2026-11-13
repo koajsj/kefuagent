@@ -7,6 +7,7 @@ import {
   Panel,
   ErrorNotice,
   Empty,
+  Loading,
   DataTable,
   Field,
 } from "../../components/ui";
@@ -112,6 +113,8 @@ export function Publications() {
         actions={<Button onPress={() => setEditing(!editing)}>创建入口</Button>}
       />
       <ErrorNotice error={rows.error} retry={rows.reload} />
+      <ErrorNotice error={setup.error} retry={setup.reload} />
+      {setup.data && !setup.data.public_rate_key_ready && <p role="status">访客限流密钥未配置，公开入口暂时不能接待访客。请联系部署管理员配置 PUBLIC_RATE_KEY。</p>}
       {editing && (
         <Panel title="创建公开入口草稿">
           <form onSubmit={create}>
@@ -121,11 +124,14 @@ export function Publications() {
             <AgentPicker value={agent} onChange={setAgent} disabled={busy} />
             <fieldset key={agent}>
               <legend>允许公开访客使用的工具（默认无）</legend>
+              <ErrorNotice error={tools.error} retry={tools.reload} />
               <ErrorNotice error={grants.error} retry={grants.reload} />
               {tools.data
                 ?.filter(
                   (t) =>
                     t.enabled &&
+                    t.runtime_bound === true &&
+                    t.key !== "conversation_history" &&
                     t.execution_type === "read_only" &&
                     t.risk_level === "low" &&
                     !t.permissions.includes("tenant:admin") &&
@@ -139,14 +145,14 @@ export function Publications() {
             </fieldset>
             <Button
               type="submit"
-              isDisabled={busy || !agent || grants.loading || !!grants.error}
+              isDisabled={busy || !agent || grants.loading || !!grants.error || tools.loading || !!tools.error}
             >
               创建草稿
             </Button>
           </form>
         </Panel>
       )}
-      {rows.data?.length ? (
+      {rows.loading ? <Loading /> : rows.error ? null : rows.data?.length ? (
         <DataTable
           columns={["名称 / Agent 版本", "状态 / 发布版本", "操作"]}
           rows={rows.data.map((r) => [
@@ -221,7 +227,9 @@ export function Publications() {
       )}
       {share && (
         <Panel title="分享与嵌入">
-          {url ? (
+          <ErrorNotice error={setup.error} retry={setup.reload} />
+          {setup.loading && <Loading />}
+          {api.mode !== "demo" ? <><p>发布 ID：{share.id} · v{share.version}。正式 Widget 需要已验证的网站和网站后端签发接口，独立公开链接不再创建匿名会话。</p><a href="#/widget-sites">登记网站、验证域名并获取接入配置</a></> : url ? (
             <>
               <Field label="公开链接">
                 <input
@@ -233,7 +241,7 @@ export function Publications() {
               <a href={url} target="_blank" rel="noopener noreferrer">
                 在独立窗口打开客服
               </a>
-              <Field label="网站嵌入代码">
+              <Field label="离线 Demo 嵌入代码">
                 <textarea
                   readOnly
                   value={widget}

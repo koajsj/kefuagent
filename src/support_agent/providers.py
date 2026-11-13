@@ -2,6 +2,7 @@
 
 import ipaddress
 import json
+import math
 import re
 import socket
 import ssl
@@ -33,6 +34,7 @@ class Completion:
     attempts: int = 1
     tool_calls: tuple[ModelToolCall, ...] = ()
     refused: bool = False
+    embedding: tuple[float, ...] = ()
 
 
 class Provider(Protocol):
@@ -111,16 +113,35 @@ def validate_base_url(url, allowed_hosts):
 class PublicNetworkBackend(httpcore.SyncBackend):
     """Resolve once, reject every non-public answer, connect the checked IP; TLS retains hostname."""
 
+    def __init__(self, private_hosts=()):
+        self.private_hosts = frozenset(private_hosts)
+
     def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         try:
             answers = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         except OSError:
             raise httpcore.ConnectError("DNS unavailable") from None
         addresses = list(dict.fromkeys(item[4][0] for item in answers))
-        if not addresses or any(
-            not ipaddress.ip_address(addr).is_global or ipaddress.ip_address(addr).is_multicast
-            for addr in addresses
-        ):
+        private_allowed = host in self.private_hosts
+
+        def permitted(addr):
+            ip = ipaddress.ip_address(addr)
+            if (
+                ip.is_multicast
+                or ip.is_link_local
+                or ip.is_unspecified
+                or (ip.is_reserved and not ip.is_loopback)
+            ):
+                return False
+            if ip.is_global:
+                return True
+            # Limit private opt-in to loopback, RFC1918 and IPv6 ULA. Metadata/link-local stays denied.
+            ranges = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+            return private_allowed and (
+                ip.is_loopback or any(ip in ipaddress.ip_network(net) for net in ranges)
+            )
+
+        if not addresses or any(not permitted(addr) for addr in addresses):
             raise ProviderFailure("unsafe_endpoint", attempts=0)
         return super().connect_tcp(addresses[0], port, timeout, local_address, socket_options)
 
@@ -154,9 +175,10 @@ def parse_completion(body, attempts, *, allow_tools=False):
         message = choice["message"]
         if allow_tools:
             refusal = message.get("refusal")
-            if (refusal or choice["finish_reason"] == "content_filter") and not message.get(
-                "tool_calls"
-            ):
+            if refusal or choice["finish_reason"] == "content_filter":
+                # A contradictory response must never turn a refusal into a tool action.
+                if message.get("tool_calls"):
+                    raise ValueError
                 return Completion("", input_tokens, output_tokens, attempts, refused=True)
             calls = message.get("tool_calls")
             if calls:
@@ -196,13 +218,38 @@ def parse_completion(body, attempts, *, allow_tools=False):
         raise ProviderFailure("invalid_response", attempts, input_tokens, output_tokens) from None
 
 
+def parse_embedding(body, attempts):
+    tokens = None
+    try:
+        value = json.loads(body)
+        usage = value.get("usage", {})
+        tokens = usage.get("prompt_tokens")
+        if tokens is not None and (type(tokens) is not int or not 0 <= tokens <= 1000000000):
+            raise ValueError
+        data = value["data"]
+        if len(data) != 1 or data[0].get("index") != 0:
+            raise ValueError
+        vector = data[0]["embedding"]
+        if (
+            not isinstance(vector, list)
+            or len(vector) != 1536
+            or not any(vector)
+            or any(type(x) not in (int, float) or not math.isfinite(x) for x in vector)
+        ):
+            raise ValueError
+        return Completion("", tokens, 0, attempts, embedding=tuple(vector))
+    except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
+        raise ProviderFailure("invalid_embedding", attempts, tokens, 0) from None
+
+
 _PROVIDER_SLOTS = BoundedSemaphore(8)
 
 
 class OpenAICompatibleProvider:
-    def __init__(self, allowed_hosts, *, enabled=True):
+    def __init__(self, allowed_hosts, *, enabled=True, private_hosts=()):
         self.allowed_hosts = allowed_hosts
         self.enabled = enabled
+        self.private_hosts = tuple(private_hosts)
 
     def complete(self, **kwargs):
         if not self.enabled:
@@ -214,17 +261,21 @@ class OpenAICompatibleProvider:
         finally:
             _PROVIDER_SLOTS.release()
 
-    def _complete_bounded(self, *, base_url, api_key, model, messages, runtime, tools=None):
+    def _complete_bounded(
+        self, *, base_url, api_key, model, messages, runtime, tools=None, embedding_input=None
+    ):
         validate_base_url(base_url, self.allowed_hosts)
         payload = json.dumps(
             {
                 "allowed_hosts": self.allowed_hosts,
+                "private_hosts": self.private_hosts,
                 "base_url": base_url,
                 "api_key": api_key,
                 "model": model,
                 "messages": messages,
                 "runtime": runtime,
                 "tools": tools,
+                "embedding_input": embedding_input,
             }
         ).encode()
         try:
@@ -264,7 +315,9 @@ class OpenAICompatibleProvider:
         except (ValueError, TypeError):
             raise ProviderFailure("invalid_response", attempts=None) from None
 
-    def complete_in_process(self, *, base_url, api_key, model, messages, runtime, tools=None):
+    def complete_in_process(
+        self, *, base_url, api_key, model, messages, runtime, tools=None, embedding_input=None
+    ):
         validate_base_url(base_url, self.allowed_hosts)
         timeout = runtime["timeout_seconds"]
         payload = json.dumps(
@@ -292,22 +345,33 @@ class OpenAICompatibleProvider:
             },
             allow_nan=False,
         ).encode()
+        if embedding_input is not None:
+            payload = json.dumps(
+                {
+                    "model": model,
+                    "input": embedding_input,
+                    "dimensions": 1536,
+                    "encoding_format": "float",
+                },
+                allow_nan=False,
+            ).encode()
         deadline = time.monotonic() + timeout
         # TLS verification enabled, no proxies, redirects or environment config.
         with httpcore.ConnectionPool(
             ssl_context=ssl.create_default_context(),
-            network_backend=PublicNetworkBackend(),
+            network_backend=PublicNetworkBackend(self.private_hosts),
             retries=0,
             max_connections=1,
         ) as pool:
-            for attempt in (1, 2):
+            for attempt in (1,):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise ProviderFailure("timeout", attempt - 1)
                 try:
                     with pool.stream(
                         "POST",
-                        base_url.rstrip("/") + "/chat/completions",
+                        base_url.rstrip("/")
+                        + ("/embeddings" if embedding_input is not None else "/chat/completions"),
                         headers={
                             "Authorization": "Bearer " + api_key,
                             "Content-Type": "application/json",
@@ -333,14 +397,6 @@ class OpenAICompatibleProvider:
                                     break
                                 error_body += part
                             category = normalize_status(response.status, error_body)
-                            if (
-                                response.status in (429, 502, 503, 504)
-                                and category != "quota_exhausted"
-                                and attempt == 1
-                                and deadline - time.monotonic() > 0.25
-                            ):
-                                time.sleep(0.2)
-                                continue
                             raise ProviderFailure(category, attempt)
                         parts = []
                         size = 0
@@ -351,6 +407,8 @@ class OpenAICompatibleProvider:
                             if time.monotonic() > deadline:
                                 raise ProviderFailure("timeout", attempt)
                             parts.append(part)
+                        if embedding_input is not None:
+                            return parse_embedding(b"".join(parts), attempt)
                         return parse_completion(
                             b"".join(parts), attempt, allow_tools=tools is not None
                         )
@@ -365,7 +423,10 @@ def main():
     try:
         payload = json.loads(sys.stdin.buffer.read(262145))
         allowed_hosts = payload.pop("allowed_hosts")
-        result = OpenAICompatibleProvider(allowed_hosts).complete_in_process(**payload)
+        private_hosts = payload.pop("private_hosts", [])
+        result = OpenAICompatibleProvider(
+            allowed_hosts, private_hosts=private_hosts
+        ).complete_in_process(**payload)
         print(json.dumps(asdict(result), ensure_ascii=False))
     except ProviderFailure as exc:
         print(

@@ -121,6 +121,12 @@ class RuntimeConfig(Input):
 
 
 class BehaviorConfig(Input):
+    autonomy_max_risk: int = Field(
+        default=1,
+        ge=0,
+        le=2,
+        description="System ceiling; R3 still requires a separately implemented approval workflow",
+    )
     answer_mode: Literal["verified_extracts", "evidence_synthesis"] = "verified_extracts"
     description: str = Field(default="", max_length=2000)
     instructions: str = Field(default="", max_length=12000)
@@ -154,6 +160,7 @@ class AgentOut(AgentCreate, Output):
 
 
 class ConversationCreate(Input):
+    idempotency_key: UUID
     subject: str = Field(default="新会话", min_length=1, max_length=160, pattern=r"\S")
     channel: str = Field(default="api", min_length=1, max_length=40, pattern=r"^[a-z][a-z0-9_-]*$")
 
@@ -168,6 +175,8 @@ class ConversationHandling(Input):
 
 
 class ConversationOut(Output):
+    unread_count: int = 0
+    last_activity_at: datetime | None = None
     assignee_id: UUID | None
     priority: Literal["low", "normal", "high", "urgent"]
     tags: list[str]
@@ -191,6 +200,7 @@ class ConversationOut(Output):
 
 
 class MessageCreate(Input):
+    idempotency_key: UUID
     role: Literal["user", "assistant", "tool"]
     content: str = Field(min_length=1, max_length=32000)
     metadata: dict[str, str | int | bool | None] = Field(default_factory=dict, max_length=20)
@@ -198,6 +208,8 @@ class MessageCreate(Input):
     @field_validator("metadata")
     @classmethod
     def bounded_metadata(cls, value):
+        if "reply_draft_id" in value:
+            raise ValueError("Draft provenance is server-managed")
         if any(len(k) > 64 or (isinstance(v, str) and len(v) > 1000) for k, v in value.items()):
             raise ValueError("Metadata fields exceed limits")
         return value
@@ -229,6 +241,16 @@ class AuditOut(Output):
     reason: str | None
     details: dict
     created_at: datetime
+
+
+class AgentChangeOut(Output):
+    id: UUID
+    actor_id: UUID | None
+    action: str
+    created_at: datetime
+    request_id: UUID
+    config_version: int | None
+    changed_fields: list[str]
 
 
 class ErrorDetail(Output):

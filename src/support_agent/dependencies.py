@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import Depends, Header, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from support_agent.db import set_tenant
@@ -89,6 +89,7 @@ def tenant_context(
     if not link:
         raise forbidden()
     set_tenant(db, link.tenant_id)
+    db.execute(text("SELECT set_config('app.user_id', :user_id, true)"), {"user_id": str(user.id)})
     request.state.tenant_id = link.tenant_id
     return ExecutionContext(
         tenant_id=link.tenant_id,
@@ -139,6 +140,7 @@ def resume_context(db, context, request, *, admin=False):
         not user
         or user.status != "active"
         or not auth
+        or auth.user_id != context.user_id
         or auth.revoked_at
         or auth.expires_at <= datetime.now(UTC)
     ):
@@ -146,4 +148,17 @@ def resume_context(db, context, request, *, admin=False):
     if not link or (admin and link.role != "admin"):
         raise forbidden()
     set_tenant(db, context.tenant_id)
+    db.execute(
+        text("SELECT set_config('app.user_id', :user_id, true)"),
+        {"user_id": str(context.user_id)},
+    )
     return replace(context, role=link.role)
+
+
+def locked_staff_context(db, context, request, *, admin=False):
+    from support_agent.db import authorization_gate
+
+    if context.public_session_id is not None:
+        raise forbidden()
+    authorization_gate(db, user_id=context.user_id, tenant_id=context.tenant_id)
+    return resume_context(db, context, request, admin=admin)

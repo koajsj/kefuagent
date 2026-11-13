@@ -9,6 +9,7 @@ import {
   DataTable,
   Status,
   JsonView,
+  Loading,
 } from "../../components/ui";
 import { useResource } from "../../hooks/useResource";
 import { collection } from "../../adapters/collection";
@@ -51,15 +52,15 @@ export function Tools() {
     <>
       <PageHeader
         title="工具协议与授权"
-        description="仅静态注册的低风险只读能力能够执行。"
+        description="部署代码限定工具能力与最低风险；R2 命令还需 Agent 自治上限及资源授权，R3 保持阻断。"
       />
       <ErrorNotice error={tools.error} retry={tools.reload} />
-      <DataTable
+      {tools.loading ? <Loading /> : !tools.error && <DataTable
         columns={["名称 / 标识", "版本 / 类型", "状态", "操作"]}
         rows={(tools.data || []).map((t) => [
           `${t.name} / ${t.key}`,
           `${t.version} / ${t.execution_type}`,
-          <Status value={t.enabled ? "active" : "inactive"} />,
+          <span><Status value={t.enabled ? "active" : "inactive"} /> · {t.runtime_bound ? "已绑定运行时" : "未绑定运行时"}{t.binding_error ? ` · ${t.binding_error}` : ""}</span>,
           <div className="actions">
             <Button variant="secondary" onPress={() => setDetail(t)}>
               查看协议
@@ -83,7 +84,7 @@ export function Tools() {
             )}
           </div>,
         ])}
-      />
+      />}
       {detail && (
         <Panel title={detail.name}>
           <JsonView value={detail} />
@@ -97,16 +98,17 @@ export function Tools() {
             .map((c) => (
               <Button
                 key={c.key}
-                isDisabled={busy}
+                isDisabled={busy || tools.loading || !!tools.error}
                 onPress={() =>
                   void act(async () => {
                     await api.request("/tools", {
                       method: "POST",
                       body: {
-                        ...c,
+                        key: c.key, version: c.version, parameters: c.parameters,
+                        output_schema: c.output_schema, execution_type: c.execution_type,
                         name: c.key,
-                        description: `平台内置只读能力 ${c.key}`,
-                        risk_level: "low",
+                        description: `部署内置客服能力 ${c.key}`,
+                        risk_level: c.minimum_risk >= 3 ? "high" : c.minimum_risk === 2 ? "medium" : "low",
                         permissions: ["tools:invoke"],
                         enabled: true,
                       },
@@ -115,7 +117,7 @@ export function Tools() {
                   })
                 }
               >
-                注册 {c.key}
+                注册 {c.key} · R{c.minimum_risk ?? 1}
               </Button>
             ))}
         </Panel>
@@ -134,13 +136,13 @@ export function Tools() {
             return (
               <div key={t.id} className="actions">
                 <span>
-                  {t.name} · {t.execution_type}
+                  {t.name} · {t.execution_type} · {t.runtime_bound ? "已绑定运行时" : "未绑定运行时"}{t.binding_error ? ` · ${t.binding_error}` : ""}
                 </span>
                 <Status value={enabled ? "active" : "inactive"} />
                 {role === "admin" && (
                   <Button
                     variant="secondary"
-                    isDisabled={busy}
+                    isDisabled={busy || (!enabled && !t.runtime_bound)}
                     onPress={() =>
                       void act(async () => {
                         await api.request(

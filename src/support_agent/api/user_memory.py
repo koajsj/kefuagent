@@ -1,10 +1,17 @@
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Path, Request, Response
 
 from support_agent.dependencies import Database, TenantContext
 from support_agent.services import user_memory
-from support_agent.user_memory_schemas import ConsentInput, ConsentOut, MemoryInput, MemoryOut
+from support_agent.user_memory_schemas import (
+    ConsentInput,
+    ConsentOut,
+    MemoryInput,
+    MemoryOut,
+    MemoryUsageOut,
+)
 
 router = APIRouter(prefix="/user-memory", tags=["User memory"])
 MemoryKey = Annotated[
@@ -30,6 +37,11 @@ def listing(db: Database, context: TenantContext):
 @router.post("/cleanup")
 def cleanup(request: Request, db: Database, context: TenantContext):
     return user_memory.cleanup(db, context, request)
+
+
+@router.get("/usage/{call_id}", response_model=MemoryUsageOut)
+def usage(call_id: UUID, db: Database, context: TenantContext):
+    return user_memory.usage(db, context, call_id)
 
 
 @router.delete("", status_code=204)

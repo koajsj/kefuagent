@@ -1,0 +1,10 @@
+# Explicit opt-in for a NEW isolated project and NEW volumes only.
+# Read docs/DEPLOYMENT.md before combining with compose.yaml. No automatic migration.
+services:
+  db:
+    image: pgvector/pgvector:0.8.7-pg17-bookworm
+volumes:
+  postgres_data:
+    name: ${PGVECTOR_DATA_VOLUME:?Set a new unused PostgreSQL volume name}
+  document_data:
+    name: ${PGVECTOR_DOCUMENT_VOLUME:?Set a new unused private document volume name}

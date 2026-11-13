@@ -3,6 +3,7 @@
 from sqlalchemy import delete, func, select
 
 from support_agent.credentials import Keyring, cipher
+from support_agent.dependencies import locked_staff_context
 from support_agent.errors import AppError
 from support_agent.models import AgentConfig, AgentKnowledgeBase, KnowledgeBase, ModelCredential
 from support_agent.services.audit import record
@@ -23,6 +24,7 @@ def knowledge_ids(db, context, config_id):
 
 
 def set_knowledge(db, context, config_id, data, request):
+    context = locked_staff_context(db, context, request, admin=True)
     config = get_owned(db, AgentConfig, context, config_id, lock=True)
     if data.expected_version is not None and config.version != data.expected_version:
         raise AppError(409, "version_conflict", "Configuration changed; reload before saving")
@@ -56,7 +58,11 @@ def set_knowledge(db, context, config_id, data, request):
             "agent_config",
             config.id,
             tenant_id=context.tenant_id,
-            details={"knowledge_base_count": len(selected)},
+            details={
+                "knowledge_base_count": len(selected),
+                "config_version": config.version,
+                "changed_fields": ["knowledge_base_ids"],
+            },
         )
         db.flush()
     return {"knowledge_base_ids": sorted(selected), "config_version": config.version}

@@ -13,7 +13,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
@@ -21,13 +21,18 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import ClientDisconnect
 
 from support_agent.api import (
+    administration,
     agents,
+    attachments,
     audit,
     conversations,
+    desk,
     identity,
     knowledge,
     model_access,
+    product_capabilities,
     public_delivery,
+    security_controls,
     tenants,
     tools,
     user_memory,
@@ -41,7 +46,7 @@ from support_agent.providers import OpenAICompatibleProvider
 from support_agent.retrieval import PostgresFTSRetriever
 from support_agent.schemas import ErrorOut
 from support_agent.services.audit import record_failure
-from support_agent.storage import LocalDocumentStorage
+from support_agent.storage import document_storage
 from support_agent.tool_runtime import ProcessToolRunner, default_registry
 
 logger = logging.getLogger("support_agent")
@@ -82,10 +87,10 @@ def create_app(settings: Settings | None = None):
             engine.dispose()
 
     app = FastAPI(
-        title="通用多租户客服平台",
+        title="KefuAgent 企业私有客服平台",
         version=version("support-agent-platform"),
         lifespan=lifespan,
-        description="Tenant-scoped knowledge, verified-extract RAG and bounded, authorized read-only tool execution.",
+        description="Single-enterprise private service desk with tenant RLS, verified knowledge and bounded, authorized tools.",
         responses={
             code: {"model": ErrorOut} for code in [401, 403, 404, 408, 409, 413, 422, 429, 500, 503]
         },
@@ -97,9 +102,11 @@ def create_app(settings: Settings | None = None):
     app.state.settings = settings
     app.state.engine = engine
     app.state.sessions = sessions
-    app.state.storage = LocalDocumentStorage(settings.document_storage_root)
+    app.state.storage = document_storage(settings)
     app.state.provider = OpenAICompatibleProvider(
-        settings.model_allowed_hosts, enabled=settings.allow_external_models
+        settings.model_allowed_hosts,
+        enabled=settings.allow_external_models,
+        private_hosts=settings.model_private_hosts,
     )
     from support_agent.demo_provider import DemoProvider
 
@@ -113,7 +120,8 @@ def create_app(settings: Settings | None = None):
         started = time.monotonic()
         request.state.request_id = getattr(request.state, "request_id", None) or uuid4()
         upload_path = request.method == "POST" and re.fullmatch(
-            r"/api/v1/knowledge-bases/[0-9a-fA-F-]{36}/documents", request.url.path
+            r"/api/v1/(?:knowledge-bases/[0-9a-fA-F-]{36}/documents|conversations/[0-9a-fA-F-]{36}/attachments|public/[0-9a-fA-F-]{36}/sessions/[0-9a-fA-F-]{36}/attachments)",
+            request.url.path,
         )
         limit = 5 * 1024 * 1024 + 65536 if upload_path else 131072
         size = 0
@@ -157,7 +165,7 @@ def create_app(settings: Settings | None = None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         if request.url.path == "/" or request.url.path.startswith(("/chat/", "/assets/")):
-            ancestors = "*" if request.url.path.startswith("/chat/") else "'none'"
+            ancestors = getattr(request.state, "widget_ancestors", "'none'")
             response.headers["Content-Security-Policy"] = (
                 f"default-src 'none'; script-src 'self'; style-src 'self' 'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o='; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors {ancestors}"
             )
@@ -272,6 +280,11 @@ def create_app(settings: Settings | None = None):
         )
 
     for module in [
+        administration,
+        security_controls,
+        product_capabilities,
+        attachments,
+        desk,
         identity,
         tenants,
         agents,
@@ -300,7 +313,21 @@ def create_app(settings: Settings | None = None):
         return FileResponse((react_web if use_react else web) / "index.html")
 
     @app.get("/chat/{pid}", include_in_schema=False)
-    def public_chat(pid: UUID):
+    def public_chat(pid: UUID, site: UUID, request: Request, db: Database):
+        from support_agent.models import WidgetSite
+        from support_agent.services.public_delivery import locate
+        from support_agent.services.widget_identity import ensure_site
+
+        publication, _, _ = locate(db, pid, request)
+        row = db.scalar(
+            select(WidgetSite).where(
+                WidgetSite.tenant_id == publication.tenant_id,
+                WidgetSite.publication_id == pid,
+                WidgetSite.id == site,
+            )
+        )
+        ensure_site(row, active=True)
+        request.state.widget_ancestors = row.origin
         return FileResponse(react_web / "index.html" if use_react else web / "public.html")
 
     @app.get("/widget.js", include_in_schema=False)

@@ -1,11 +1,12 @@
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
 from support_agent.dependencies import Database, TenantAdmin, TenantContext
 from support_agent.models import AgentConfig
-from support_agent.operations_schemas import AnalyticsOut, OperatorOut
+from support_agent.operations_schemas import AnalyticsOut, OperatorOut, StaffFeedbackOut
 from support_agent.rag_schemas import KnowledgeBindings
 from support_agent.services import workspace
 from support_agent.services.resources import get_owned
@@ -79,3 +80,29 @@ def analytics(
     end = end or datetime.now(UTC)
     start = start or end - timedelta(days=7)
     return report(db, context, start, end)
+
+
+@router.get("/workspace/feedback", response_model=list[StaffFeedbackOut])
+def feedback(
+    db: Database,
+    context: TenantContext,
+    rating: Literal["satisfied", "dissatisfied"] | None = None,
+    limit: int = Query(30, ge=1, le=100),
+    before: UUID | None = None,
+):
+    from sqlalchemy import select, tuple_
+
+    from support_agent.models import VisitorFeedback
+
+    query = select(VisitorFeedback).where(VisitorFeedback.tenant_id == context.tenant_id)
+    if rating:
+        query = query.where(VisitorFeedback.rating == rating)
+    if before:
+        anchor = get_owned(db, VisitorFeedback, context, before)
+        query = query.where(
+            tuple_(VisitorFeedback.created_at, VisitorFeedback.id)
+            < tuple_(anchor.created_at, anchor.id)
+        )
+    return db.scalars(
+        query.order_by(VisitorFeedback.created_at.desc(), VisitorFeedback.id.desc()).limit(limit)
+    ).all()

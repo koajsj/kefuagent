@@ -2,18 +2,20 @@
 
 import hashlib
 import hmac
-import secrets
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4, uuid5
 
 from sqlalchemy import func, select, text
 
 from support_agent.db import set_tenant
+from support_agent.dependencies import locked_staff_context
 from support_agent.errors import AppError, missing
 from support_agent.models import (
     AgentConfig,
     Conversation,
     Membership,
+    Message,
     ModelCall,
     Publication,
     PublicRoute,
@@ -22,22 +24,32 @@ from support_agent.models import (
     User,
     VisitorSession,
 )
+from support_agent.public_schemas import VisitorMessageReceipt
 from support_agent.security import token_digest
 from support_agent.services import agent_turns, conversations, tool_execution
 from support_agent.services.audit import record
 from support_agent.services.resources import get_owned
+from support_agent.services.tool_connectors import PUBLIC_DENIED_KEYS
 from support_agent.tool_protocol import AgentTurnInput, ExecutionContext
 
 
-def create(db, context, data, request):
-    config = get_owned(db, AgentConfig, context, data.agent_config_id, lock=True)
+def validate_public_tools(db, context, config, tool_ids, request):
     tools = tool_execution.authorized_tools(
         db, replace(context, role="visitor"), config.id, request.app.state.tool_registry
     )
-    if not set(data.public_tool_ids).issubset({t.id for t in tools}):
+    # This is publication configuration, before a visitor session exists. Apply
+    # the same static exclusions as runtime rather than relying on session context.
+    allowed = {str(t.id) for t in tools if t.key not in PUBLIC_DENIED_KEYS}
+    if not set(map(str, tool_ids)).issubset(allowed):
         raise AppError(
             422, "public_tool_denied", "Public tools require active low-risk read-only Agent grants"
         )
+
+
+def create(db, context, data, request):
+    context = locked_staff_context(db, context, request, admin=True)
+    config = get_owned(db, AgentConfig, context, data.agent_config_id, lock=True)
+    validate_public_tools(db, context, config, data.public_tool_ids, request)
     route = PublicRoute(tenant_id=context.tenant_id)
     db.add(route)
     db.flush()
@@ -57,6 +69,7 @@ def create(db, context, data, request):
 
 
 def change(db, context, pid, data, request):
+    context = locked_staff_context(db, context, request, admin=True)
     row = get_owned(db, Publication, context, pid, lock=True)
     config = get_owned(db, AgentConfig, context, row.agent_config_id, lock=True)
     if row.revoked_at:
@@ -65,6 +78,8 @@ def change(db, context, pid, data, request):
         raise AppError(409, "version_conflict", "Reload publication before changing it")
     if data.enabled and not config.enabled:
         raise AppError(409, "agent_disabled", "Enable the Agent first")
+    if data.enabled:
+        validate_public_tools(db, context, config, row.public_tool_ids, request)
     row.enabled = data.enabled
     if data.enabled:
         row.created_by = context.user_id
@@ -83,6 +98,7 @@ def change(db, context, pid, data, request):
 
 
 def revoke(db, context, pid, request):
+    context = locked_staff_context(db, context, request, admin=True)
     row = get_owned(db, Publication, context, pid, lock=True)
     row.enabled = False
     row.revoked_at = datetime.now(UTC)
@@ -142,7 +158,7 @@ def locate(db, pid, request):
     return row, config, link
 
 
-def start(db, pid, request):
+def start(db, pid, request, *, bootstrap_token):
     row, config, link = locate(db, pid, request)
     db.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key,0))"),
@@ -183,6 +199,9 @@ def start(db, pid, request):
         raise AppError(
             429, "visitor_limit_exceeded", "Public session creation limit reached; retry later"
         )
+    from support_agent.services.widget_identity import consume
+
+    site = consume(db, row, bootstrap_token, request)
     conv = Conversation(
         tenant_id=row.tenant_id,
         created_by=row.created_by,
@@ -191,15 +210,26 @@ def start(db, pid, request):
     )
     db.add(conv)
     db.flush()
-    token = secrets.token_urlsafe(32)
+    from support_agent.services.widget_identity import credential_scope, signed_credential
+
+    visitor_id = uuid4()
+    expires_at = now + timedelta(hours=1)
+    token = signed_credential(
+        request.app.state.settings,
+        "visitor",
+        credential_scope(row, site, visitor_id, expires_at, conversation_id=conv.id),
+    )
     visitor = VisitorSession(
+        id=visitor_id,
         tenant_id=row.tenant_id,
         publication_id=pid,
         publication_version=row.version,
         conversation_id=conv.id,
+        site_id=site.id,
+        site_version=site.version,
         token_hash=token_digest(token),
         ip_hash=iphash,
-        expires_at=now + timedelta(hours=12),
+        expires_at=expires_at,
     )
     db.add(visitor)
     db.flush()
@@ -233,6 +263,24 @@ def authenticate(db, pid, sid, request):
         or visitor.publication_version != row.version
     ):
         raise AppError(401, "visitor_authentication_required", "Visitor session expired or invalid")
+    from support_agent.services.widget_identity import authenticate_site
+
+    site = authenticate_site(db, visitor, request)
+    from support_agent.services.widget_identity import credential_scope, verify_credential
+
+    if not verify_credential(
+        request.app.state.settings,
+        "visitor",
+        credential_scope(
+            row, site, visitor.id, visitor.expires_at, conversation_id=visitor.conversation_id
+        ),
+        authorization[8:],
+    ):
+        raise AppError(
+            401,
+            "visitor_authentication_required",
+            "Visitor credential signature is no longer valid",
+        )
     request.state.visitor_session_id = visitor.id
     request.state.visitor_digest = digest
     request.state.publication_id = pid
@@ -275,11 +323,36 @@ def public_tool_allowed(db, context, tool_id):
 
 
 def turn(db, context, data, request):
-    get_owned(db, Conversation, context, context.conversation_id, lock=True)
+    conversation = get_owned(db, Conversation, context, context.conversation_id, lock=True)
     context = resume_visitor(db, context, request)
     visitor = get_owned(db, VisitorSession, context, context.public_session_id, refresh=True)
     if visitor.ended_at:
         raise AppError(409, "conversation_closed", "Start a new visitor session")
+    # Share the conversation lock with handling changes and AI reservations. A durable,
+    # session-scoped message ID prevents retries from becoming AI turns after a mode switch.
+    message_id = uuid5(visitor.id, "visitor-message:" + str(data.idempotency_key))
+    message = db.scalar(
+        select(Message).where(
+            Message.tenant_id == context.tenant_id,
+            Message.conversation_id == conversation.id,
+            Message.id == message_id,
+        )
+    )
+    if message:
+        receipt = message_receipt(db, context, message.id, request)
+        if message.content != data.content:
+            raise AppError(409, "idempotency_conflict", "Key is associated with another input")
+        return receipt
+    if conversation.support_state in {"waiting", "human"}:
+        previous_call = db.scalar(
+            select(ModelCall.id).where(
+                ModelCall.tenant_id == context.tenant_id,
+                ModelCall.conversation_id == conversation.id,
+                ModelCall.idempotency_key == data.idempotency_key,
+            )
+        )
+        if previous_call is None:
+            return visitor_message(db, context, data, request, conversation=conversation)
     return agent_turns.turn(
         db,
         context,
@@ -290,6 +363,82 @@ def turn(db, context, data, request):
             idempotency_key=data.idempotency_key,
         ),
         request,
+    )
+
+
+def visitor_message(db, context, data, request, *, conversation=None):
+    conversation = conversation or get_owned(
+        db, Conversation, context, context.conversation_id, lock=True
+    )
+    context = resume_visitor(db, context, request)
+    visitor = get_owned(db, VisitorSession, context, context.public_session_id, refresh=True)
+    message_id = uuid5(visitor.id, "visitor-message:" + str(data.idempotency_key))
+    message = db.scalar(select(Message).where(Message.id == message_id))
+    if message:
+        receipt = message_receipt(db, context, message.id, request)
+        if message.content != data.content:
+            raise AppError(409, "idempotency_conflict", "Key is associated with another input")
+        return receipt
+    previous_call = db.scalar(
+        select(ModelCall.id).where(
+            ModelCall.tenant_id == context.tenant_id,
+            ModelCall.conversation_id == conversation.id,
+            ModelCall.idempotency_key == data.idempotency_key,
+        )
+    )
+    if previous_call is not None:
+        raise AppError(409, "idempotency_conflict", "Key is associated with an AI turn")
+    if conversation.status != "open" or conversation.support_state == "resolved":
+        raise AppError(409, "conversation_closed", "Conversation is closed")
+    if conversation.support_state not in {"waiting", "human"}:
+        raise AppError(409, "human_handling_required", "Conversation is not awaiting human support")
+    since = datetime.now(UTC) - timedelta(minutes=1)
+    recent = db.scalar(
+        select(func.count())
+        .select_from(Message)
+        .where(
+            Message.tenant_id == context.tenant_id,
+            Message.conversation_id == conversation.id,
+            Message.role == "user",
+            Message.source == "manual",
+            Message.created_at >= since,
+        )
+    )
+    if recent >= 30:
+        raise AppError(
+            429, "visitor_message_limit_exceeded", "Message rate limit reached; retry later"
+        )
+    message = Message(
+        id=message_id,
+        tenant_id=context.tenant_id,
+        conversation_id=conversation.id,
+        created_by=context.user_id,
+        role="user",
+        source="manual",
+        content=data.content,
+        created_at=func.clock_timestamp(),
+        message_metadata={"visitor_session_id": str(visitor.id)},
+    )
+    db.add(message)
+    conversation.updated_at = datetime.now(UTC)
+    db.flush()
+    record(db, request, "visitor.message", "message", message.id, tenant_id=context.tenant_id)
+    return message_receipt(db, context, message.id, request)
+
+
+def message_receipt(db, context, message_id, request):
+    message = get_owned(db, Message, context, message_id)
+    if (
+        message.conversation_id != context.conversation_id
+        or message.source != "manual"
+        or message.role != "user"
+        or message.message_metadata.get("visitor_session_id") != str(context.public_session_id)
+    ):
+        raise missing()
+    return VisitorMessageReceipt(
+        conversation_id=message.conversation_id,
+        message_id=message.id,
+        request_id=request.state.request_id,
     )
 
 
@@ -395,6 +544,7 @@ def history(db, context, request, limit, offset, *, after=None, before=None):
             {
                 "id": row.id,
                 "role": row.role,
+                "source": row.source,
                 "content": row.content,
                 "created_at": row.created_at,
                 "citations": metadata.get("citations", []),

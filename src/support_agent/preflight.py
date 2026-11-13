@@ -15,6 +15,23 @@ from support_agent.errors import AppError
 from support_agent.providers import validate_base_url
 
 RLS_TABLES = (
+    "knowledge_indexes",
+    "chunk_embeddings",
+    "customer_exports",
+    "reply_drafts",
+    "erasure_requests",
+    "tool_approvals",
+    "budget_policies",
+    "cost_reservations",
+    "widget_sites",
+    "widget_bootstraps",
+    "customer_memories",
+    "conversation_attachments",
+    "customers",
+    "conversation_customers",
+    "tickets",
+    "ticket_events",
+    "staff_notifications",
     "agent_configs",
     "conversations",
     "messages",
@@ -34,6 +51,7 @@ RLS_TABLES = (
     "visitor_feedback",
     "user_memory_consents",
     "user_memories",
+    "conversation_read_cursors",
 )
 POLICY_EXPRESSION = (
     "(tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)"
@@ -42,7 +60,7 @@ USER_POLICY_EXPRESSION = (
     "((tenant_id = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid) "
     "AND (user_id = (NULLIF(current_setting('app.user_id'::text, true), ''::text))::uuid))"
 )
-USER_MEMORY_TABLES = {"user_memory_consents", "user_memories"}
+USER_MEMORY_TABLES = {"user_memory_consents", "user_memories", "conversation_read_cursors"}
 
 
 def inspect(settings, engine, *, production=False):
@@ -233,26 +251,33 @@ def inspect(settings, engine, *, production=False):
         with engine.connect() as connection:
             memory_privileges = connection.execute(
                 text("""
-                    SELECT count(*) = 2 AND bool_and(
+                    SELECT count(*) = 3 AND bool_and(
                         has_table_privilege(current_user, c.oid, 'SELECT')
                         AND has_table_privilege(current_user, c.oid, 'INSERT')
                         AND has_table_privilege(current_user, c.oid, 'UPDATE')
                         AND has_table_privilege(current_user, c.oid, 'DELETE'))
                     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                     WHERE n.nspname = 'public' AND c.relkind = 'r'
-                      AND c.relname IN ('user_memory_consents', 'user_memories')
+                      AND c.relname IN ('user_memory_consents', 'user_memories', 'conversation_read_cursors')
                 """)
             ).scalar_one()
         add(
             "user_memory_privileges",
             "ok" if memory_privileges else "error",
-            "运行角色具有两张用户记忆表的 SELECT/INSERT/UPDATE/DELETE 权限。"
+            "运行角色具有用户记忆和成员已读游标三张表的 SELECT/INSERT/UPDATE/DELETE 权限。"
             if memory_privileges
-            else "缺少用户记忆表或运行权限；由迁移角色明确授权，不能赋予所有权或绕过 RLS。",
+            else "缺少用户记忆/已读游标表或运行权限；由迁移角色明确授权，不能赋予所有权或绕过 RLS。",
         )
     except (SQLAlchemyError, OSError):
-        add("user_memory_privileges", "error", "无法检查用户记忆表的运行角色权限。")
+        add("user_memory_privileges", "error", "无法检查用户记忆和已读游标的运行角色权限。")
 
+    add(
+        "widget_instance",
+        "ok" if settings.widget_instance_id else "warning",
+        "可信网站签名使用显式部署 UUID；域名与签发后端仍需验收。"
+        if settings.widget_instance_id
+        else "未配置 WIDGET_INSTANCE_ID；可信 Widget 将拒绝签发凭证。",
+    )
     setup_complete = False
     try:
         with engine.connect() as connection:
@@ -294,28 +319,35 @@ def inspect(settings, engine, *, production=False):
         if settings.public_rate_key
         else "缺少公开限流密钥；配置独立随机密钥。",
     )
-    root = settings.document_storage_root
-    writable = root.is_dir() and os.access(root, os.W_OK | os.X_OK)
-    add(
-        "document_storage",
-        "ok" if writable else "error",
-        "文档目录存在且当前用户可写。"
-        if writable
-        else "文档目录不存在或不可写；由运营方创建私有目录并授权服务账号。",
-    )
-    if production:
-        try:
-            mode = root.lstat().st_mode
-            private_root = stat.S_ISDIR(mode) and not mode & 0o077
-        except OSError:
-            private_root = False
+    if settings.document_storage_backend == "s3":
         add(
-            "private_storage",
-            "ok" if private_root else "error",
-            "文档根目录是仅所有者可访问的普通目录；ACL/共享存储仍需部署方验证。"
-            if private_root
-            else "文档根目录须为私有普通目录（0700），不得为链接或公开可读写。",
+            "document_storage",
+            "warning",
+            "S3 配置格式已检查；对象权限、条件写入、版本/生命周期、连通性及恢复均需运行时验收，未进行网络请求。",
         )
+    else:
+        root = settings.document_storage_root
+        writable = root.is_dir() and os.access(root, os.W_OK | os.X_OK)
+        add(
+            "document_storage",
+            "ok" if writable else "error",
+            "文档目录存在且当前用户可写。"
+            if writable
+            else "文档目录不存在或不可写；由运营方创建私有目录并授权服务账号。",
+        )
+        if production:
+            try:
+                mode = root.lstat().st_mode
+                private_root = stat.S_ISDIR(mode) and not mode & 0o077
+            except OSError:
+                private_root = False
+            add(
+                "private_storage",
+                "ok" if private_root else "error",
+                "文档根目录是仅所有者可访问的普通目录；ACL/共享存储仍需部署方验证。"
+                if private_root
+                else "文档根目录须为私有普通目录（0700），不得为链接或公开可读写。",
+            )
     add("web_origin", "ok", "Web Origin 格式有效；请核对实际访问地址及 HTTPS 代理。")
     try:
         for host in settings.model_allowed_hosts:

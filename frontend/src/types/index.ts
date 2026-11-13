@@ -1,5 +1,6 @@
 export type Row = { id: string; [key: string]: any };
 export type RequestOptions = {
+  responseType?: "blob";
   method?: string;
   body?: unknown;
   signal?: AbortSignal;
@@ -33,6 +34,7 @@ export interface UserMemory extends Row {
   expires_at: string;
   created_at: string;
   updated_at: string;
+  last_used_at: string | null;
 }
 export interface MemoryInput {
   source_message_id: string;
@@ -58,6 +60,8 @@ export interface Conversation extends Row {
   created_at: string;
   updated_at: string;
   sla: Record<string, string | number | null>;
+  unread_count: number;
+  last_activity_at: string | null;
 }
 export interface Agent extends Row {
   name: string;

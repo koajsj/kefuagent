@@ -1,6 +1,6 @@
 import { Button } from "@heroui/react";
 import { useState } from "react";
-import { useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { useApp } from "../../app/context";
 import { useResource } from "../../hooks/useResource";
 import {
@@ -112,8 +112,7 @@ export function UserMemory() {
                   <strong>{item.memory_key}</strong>
                   <p>{item.quote}</p>
                   <small>
-                    来源消息 {item.source_message_id} · 到期{" "}
-                    {date(item.expires_at)} · 版本 {item.version}
+                    <Link to="/chat" state={{ conversationId: item.source_conversation_id, messageId: item.source_message_id }}>查看来源会话</Link> · 创建 {date(item.created_at)} · 最近使用 {item.last_used_at ? date(item.last_used_at) : "尚未使用"} · 到期 {date(item.expires_at)} · 版本 {item.version}
                   </small>
                 </div>
                 <div className="actions">
@@ -189,6 +188,9 @@ export function UserMemory() {
               const values = new FormData(event.currentTarget);
               const key =
                 editing?.memory_key || String(values.get("key") || "").trim();
+              const quote = String(values.get("quote") || "");
+              const existing = editing || memories.data?.find((item) => item.memory_key === key);
+              if (existing && !window.confirm(`请确认替换记忆“${key}”：\n\n原内容：${existing.quote}\n\n新内容：${quote}\n\n系统不会自动合并内容。`)) return;
               void action(
                 () =>
                   api.request(`/user-memory/${encodeURIComponent(key)}`, {
@@ -197,9 +199,9 @@ export function UserMemory() {
                       source_message_id: String(
                         values.get("source") || "",
                       ).trim(),
-                      quote: String(values.get("quote") || ""),
+                      quote,
                       retention_days: Number(values.get("days")),
-                      expected_version: editing?.version ?? null,
+                      expected_version: existing?.version ?? null,
                     },
                   }),
                 "记忆已保存",

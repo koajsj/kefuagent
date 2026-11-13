@@ -10,6 +10,15 @@ from support_agent.models import ModelCall
 
 def scope_usage(db, context, call, field=None):
     now = datetime.now(UTC)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    unsettled = (ModelCall.status == "running") | (
+        (ModelCall.reserved_tokens > 0)
+        & (
+            ModelCall.attempts.is_(None)
+            | ModelCall.input_tokens.is_(None)
+            | ModelCall.output_tokens.is_(None)
+        )
+    )
     filters = [
         ModelCall.tenant_id == context.tenant_id,
         ModelCall.id != call.id,
@@ -19,7 +28,7 @@ def scope_usage(db, context, call, field=None):
                 now - timedelta(minutes=1),
                 now.replace(hour=0, minute=0, second=0, microsecond=0),
             ),
-            (ModelCall.status == "running") & (ModelCall.lease_expires_at > now),
+            unsettled,
         ),
     ]
     if field == "created_by":
@@ -34,7 +43,7 @@ def scope_usage(db, context, call, field=None):
             ),
             func.coalesce(
                 func.sum(ModelCall.reserved_tokens).filter(
-                    ModelCall.created_at >= now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    (ModelCall.created_at >= today) | unsettled
                 ),
                 0,
             ),
@@ -51,12 +60,9 @@ def admit(db, context, call, request, runtime, *, offline=False):
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": "model-admission:" + str(context.tenant_id)},
     )
-    logical_steps = 5 if call.kind == "agent" else 1
-    call.reserved_tokens = (
-        0
-        if call.kind == "tool_execution" or offline
-        else logical_steps * 4 * (runtime["max_input_tokens"] + runtime["max_output_tokens"])
-    )
+    # Each paid dispatch reserves its own reviewed bound at the gateway, including
+    # embedding/reranking/fallback. A guessed fixed number of steps is insufficient.
+    call.reserved_tokens = 0
     if context.public_session_id is not None:
         from support_agent.models import VisitorSession
 
@@ -91,14 +97,52 @@ def admit(db, context, call, request, runtime, *, offline=False):
             )
 
 
+def reserve_step(db, context, call, request, pricing, runtime):
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": "model-admission:" + str(context.tenant_id)},
+    )
+    # Keep one call in its admission day; running/unknown reservations carry
+    # forward until accounted, so crossing midnight cannot reset an in-flight run.
+    if call.created_at.date() != datetime.now(UTC).date():
+        raise AppError(
+            409, "token_reservation_day_changed", "Start a fresh request for the new UTC day"
+        )
+    bound = pricing["context_window_tokens"] + runtime["max_output_tokens"]
+    for scope, field in (("tenant", None), ("user", "created_by"), ("agent", "agent_config_id")):
+        if scope == "user" and context.public_session_id is not None:
+            continue
+        used = scope_usage(db, context, call, field)["tokens_reserved_today"]
+        if used + call.reserved_tokens + bound > getattr(
+            request.app.state.settings, scope + "_daily_token_budget"
+        ):
+            raise AppError(
+                429, "token_budget_exceeded", "Conservative daily token budget exhausted"
+            )
+    call.reserved_tokens += bound
+    return bound
+
+
 def settle(call):
+    if call.steps and all(
+        "token_reservation" in step or step.get("attempts") == 0 for step in call.steps
+    ):
+        call.reserved_tokens = sum(
+            0
+            if step.get("attempts") == 0
+            else step["input_tokens"] + step["output_tokens"]
+            if step.get("usage_complete")
+            else step.get("token_reservation", 0)
+            for step in call.steps
+        )
+        return
     if call.status == "running":
         return
     if call.attempts == 0 and not call.steps:
         call.reserved_tokens = 0
     elif call.steps and all(step.get("usage_complete") for step in call.steps):
         call.reserved_tokens = sum(s["input_tokens"] + s["output_tokens"] for s in call.steps)
-    # Unknown/ambiguous usage holds the reservation until the next UTC day; never treat null as zero.
+    # Legacy ambiguous usage retains its reservation; never treat null as zero.
 
 
 def view(db, context, request):

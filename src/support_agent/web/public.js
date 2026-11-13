@@ -1,3 +1,4 @@
+import { websiteBootstrap } from "./widget-bootstrap.js";
 import { readEvents } from "./stream.js";
 import { sessionState } from "./storage.js";
 import {
@@ -23,7 +24,7 @@ let info,
   pollTimer, pollController, pollGeneration = 0, pollFailures = 0, pollInFlight = false,
   latestId = null, pageStopped = false, conversationClosed = false;
 const displayedIds = new Set();
-const key = "support.visitor." + pid;
+const key = "support.visitor." + pid + "." + (new URL(location.href).searchParams.get("site") || "untrusted");
 const feedback = el("div"),
   ratingArea = el("section", {class:"public-rating"}),
   thread = el("div", {
@@ -201,7 +202,7 @@ async function start() {
   if (busy) return;
   busy = true;
   try {
-    session = await api("/sessions", { method: "POST" });
+    session = await api("/sessions", { method: "POST", body: { bootstrap_token: await websiteBootstrap(pid, assertion => api("/bootstrap", { method: "POST", body: assertion })) } });
     pending = null;
     body.value = "";
     save();
@@ -313,7 +314,9 @@ function render() {
       }
       feedback.replaceChildren(
         message(
-          result.status === "failed"
+          result.status === "received"
+            ? "消息已发送，等待人工客服回复。"
+            : result.status === "failed"
             ? "回复失败：" + result.error_category
             : result.status === "running"
               ? "请求仍在执行。请稍后刷新消息或重试同一问题。"
@@ -324,7 +327,8 @@ function render() {
         ),
       );
       await loadHistory();
-      await runtime();
+      if (result.status === "received") runs.textContent = "等待人工客服回复";
+      else await runtime();
       await loadRating();
     } catch (error) {
       showError(error);

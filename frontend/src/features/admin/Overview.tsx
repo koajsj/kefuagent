@@ -9,9 +9,11 @@ import {
   Field,
   DataTable,
   Empty,
+  Loading,
 } from "../../components/ui";
 import { useResource } from "../../hooks/useResource";
 import type { Row } from "../../types";
+import { FeedbackInbox } from "./FeedbackInbox";
 const day = (d: Date) => d.toISOString().slice(0, 10);
 const number = (value: number | null | undefined) =>
   value == null ? "未知" : value.toLocaleString("zh-CN");
@@ -180,9 +182,12 @@ export function Dashboard() {
                 {number(u.unknown_usage_calls)} 次用量未知
               </p>
               <p>
-                已知费用 {number(u.known_cost)} · {number(u.unknown_cost_calls)}{" "}
-                次费用未知
+                {u.cost_complete ? "费用估算完整" : "费用估算不完整"} · {number(u.unknown_cost_calls)} 次费用未知。按调用时保存的价格估算，非账单。
               </p>
+              {Object.entries(u.known_cost_subtotals || {}).map(([currency, amount]) => (
+                <p key={currency}>已知费用小计：{String(amount)} {currency}</p>
+              ))}
+              {!Object.keys(u.known_cost_subtotals || {}).length && <p className="note">暂无已计价小计；未派发请求不产生外部模型费用，未知价格或用量不按零计。</p>}
               {u.models.length ? (
                 <DataTable
                   columns={[
@@ -219,7 +224,7 @@ export function Dashboard() {
               {s.unresolved.length ? (
                 <DataTable
                   columns={["未解决会话", "编号"]}
-                  rows={s.unresolved.map((x: Row) => [x.subject, x.id])}
+                  rows={s.unresolved.map((x: Row) => [<Link to="/chat" state={{ conversationId: x.id }}>{x.subject}</Link>, x.id])}
                 />
               ) : (
                 <Empty>暂无未解决会话。</Empty>
@@ -235,6 +240,7 @@ export function Dashboard() {
           </>
         )
       )}
+      <FeedbackInbox />
     </>
   );
 }
@@ -242,6 +248,7 @@ export function Onboarding() {
   const { api, tenant, role, user, notify, refreshSession } = useApp();
   const [busy, setBusy] = useState(false),
     [result, setResult] = useState<Row | null>(null);
+  const enterprise = useResource<Row[]>((signal) => user.is_platform_admin && role !== "admin" ? api.request("/tenants?limit=1", { signal }) : Promise.resolve([]), [api, user.is_platform_admin, role]);
   const status = useResource<Row[]>(
     (signal) =>
       role === "admin"
@@ -294,7 +301,7 @@ export function Onboarding() {
             {result && (
               <p>
                 {result.created ? "已创建" : "已找到"}离线演示资源。文档状态：
-                {result.document_status}；知识库 {result.knowledge_base_id}
+                {result.document_status} · {result.document_published ? "已发布" : "未发布，请到知识库确认发布"}；知识库 {result.knowledge_base_id}
                 ；文档 {result.document_id}；Agent {result.agent_config_id}。
               </p>
             )}
@@ -371,11 +378,12 @@ export function Onboarding() {
           )}
         </>
       ) : user.is_platform_admin ? (
-        <Panel title="创建企业">
+        <Panel title="企业初始化与权限">
           <p>
-            平台管理员身份不会自动赋予企业权限。已有企业请先选择有成员权限的企业。
+            实例账户管理权限不会自动赋予企业权限。每个部署实例只允许初始化一个企业。
           </p>
-          <form
+          <ErrorNotice error={enterprise.error} retry={enterprise.reload} />
+          {enterprise.loading ? <Loading /> : !enterprise.error && (enterprise.data?.length ? <p>企业已初始化。请联系企业管理员将此账户加入成员并授予所需权限。</p> : <form
             onSubmit={(e) => {
               e.preventDefault();
               const d = new FormData(e.currentTarget);
@@ -407,7 +415,7 @@ export function Onboarding() {
             <Button type="submit" isDisabled={busy}>
               创建企业并进入
             </Button>
-          </form>
+          </form>)}
         </Panel>
       ) : (
         <p>使用向导需要企业管理员权限。</p>

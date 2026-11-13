@@ -46,67 +46,44 @@ const VisitorPage = lazy(() =>
   })),
 );
 const navigation = [
-  {
-    path: "dashboard",
-    name: "工作区概览",
-    icon: LayoutDashboard,
-    group: "工作空间",
-  },
-  { path: "chat", name: "客服会话", icon: MessagesSquare, group: "工作空间" },
-  { path: "knowledge", name: "知识库", icon: BookOpen, group: "工作空间" },
-  { path: "memory", name: "个人记忆", icon: Bookmark, group: "工作空间" },
-  { path: "agents", name: "Agent", icon: Bot, group: "构建与接入" },
-  { path: "tools", name: "工具与授权", icon: Wrench, group: "构建与接入" },
-  {
-    path: "publications",
-    name: "发布与嵌入",
-    icon: Globe,
-    group: "构建与接入",
-    admin: true,
-  },
-  {
-    path: "credentials",
-    name: "模型凭证",
-    icon: KeyRound,
-    group: "管理",
-    admin: true,
-  },
-  {
-    path: "activity",
-    name: "用量与审计",
-    icon: Activity,
-    group: "管理",
-    admin: true,
-  },
-  {
-    path: "members",
-    name: "企业成员",
-    icon: Users,
-    group: "管理",
-    admin: true,
-  },
-  {
-    path: "setup",
-    name: "运行设置",
-    icon: Settings2,
-    group: "管理",
-    admin: true,
-  },
-  {
-    path: "onboarding",
-    name: "首次使用",
-    icon: WandSparkles,
-    group: "管理",
-    admin: true,
-  },
-  {
-    path: "platform",
-    name: "平台管理",
-    icon: Building2,
-    group: "管理",
-    platform: true,
-  },
+  { path: "dashboard", name: "工作概览", icon: LayoutDashboard, group: "客服" },
+  { path: "inbox", name: "收件箱", icon: MessagesSquare, group: "客服" },
+  { path: "conversations", name: "全部会话", icon: MessagesSquare, group: "客服" },
+  { path: "chat", name: "会话工作台", icon: MessagesSquare, group: "客服" },
+  { path: "customers", name: "客户", icon: Users, group: "客服" },
+  { path: "tickets", name: "工单", icon: Bookmark, group: "客服" },
+  { path: "agents", name: "Agent 配置", icon: Bot, group: "Agent" },
+  { path: "autonomy", name: "自治策略", icon: Settings2, group: "Agent", admin: true },
+  { path: "tools", name: "工具与授权", icon: Wrench, group: "Agent" },
+  { path: "executions", name: "执行与 Trace", icon: Activity, group: "Agent", admin: true },
+  { path: "quality", name: "质量与反馈", icon: Activity, group: "Agent", admin: true },
+  { path: "knowledge", name: "知识库", icon: BookOpen, group: "知识" },
+  { path: "documents", name: "文档与分块", icon: BookOpen, group: "知识" },
+  { path: "retrieval", name: "检索诊断", icon: BookOpen, group: "知识", admin: true },
+  { path: "indexes", name: "向量索引", icon: BookOpen, group: "知识", admin: true },
+  { path: "memory", name: "个人记忆", icon: Bookmark, group: "知识" },
+  { path: "providers", name: "模型与凭证", icon: KeyRound, group: "模型与接入", admin: true },
+  { path: "routing", name: "模型路由", icon: Bot, group: "模型与接入", admin: true },
+  { path: "usage", name: "用量与成本", icon: Activity, group: "模型与接入", admin: true },
+  { path: "integrations", name: "接入能力", icon: Globe, group: "模型与接入", admin: true },
+  { path: "publications", name: "发布与 Widget", icon: Globe, group: "模型与接入", admin: true },
+  { path: "members", name: "成员与权限", icon: Users, group: "管理", admin: true },
+  { path: "security", name: "安全与审计", icon: Activity, group: "管理", admin: true },
+  { path: "erasure", name: "数据擦除", icon: Bookmark, group: "管理", admin: true },
+  { path: "approvals", name: "R3 审批", icon: Activity, group: "Agent" },
+  { path: "budget", name: "金额预算", icon: Activity, group: "模型与接入", admin: true },
+  { path: "widget-sites", name: "可信网站", icon: Globe, group: "模型与接入", admin: true },
+  { path: "retention", name: "数据保留", icon: Bookmark, group: "管理", admin: true },
+  { path: "recovery", name: "备份与恢复", icon: Building2, group: "管理", admin: true },
+  { path: "settings", name: "系统设置", icon: Settings2, group: "管理", admin: true },
+  { path: "setup", name: "运行检查", icon: Settings2, group: "管理", admin: true },
+  { path: "onboarding", name: "首次使用", icon: WandSparkles, group: "管理", admin: true },
+  { path: "platform", name: "实例账户", icon: Building2, group: "管理", platform: true },
+  // Existing URLs remain available for bookmarked clients.
+  { path: "credentials", name: "模型凭证", icon: KeyRound, group: "兼容入口", admin: true },
+  { path: "activity", name: "用量与审计", icon: Activity, group: "兼容入口", admin: true },
 ];
+
 function PublicRoute() {
   const { id = "" } = useParams();
   return <VisitorPage key={id} publicationId={id} />;
@@ -117,7 +94,8 @@ function Workspace() {
     [pending, setPending] = useState(true),
     [error, setError] = useState<unknown>(),
     [notice, setNotice] = useState(""),
-    [collapsed, setCollapsed] = useState(false);
+    [collapsed, setCollapsed] = useState(false),
+    [demoGuide, setDemoGuide] = useState(() => adapter.mode === "demo" && !sessionState.get("support.demo.guide.seen"));
   const epoch = useRef(0),
     toast = useRef<ReturnType<typeof setTimeout>>(undefined),
     location = useLocation();
@@ -264,8 +242,8 @@ function Workspace() {
           <div className="sidebar-footer">
             {!collapsed && (
               <>
-                <label htmlFor="workspace-select">企业工作区</label>
-                <select
+                <label htmlFor="workspace-select">本实例企业</label>
+                {tenants.length <= 1 ? <p>{tenants[0]?.name || "尚未初始化"}</p> : <select
                   id="workspace-select"
                   className="workspace-select"
                   value={session.tenant}
@@ -281,7 +259,7 @@ function Workspace() {
                       {t.name}
                     </option>
                   ))}
-                </select>
+                </select>}
                 <small>
                   {session.user.display_name} ·{" "}
                   {session.role === "admin"
@@ -329,12 +307,24 @@ function Workspace() {
                 所有资料均为虚构。操作保存在当前标签页，不连接后端、不调用模型。
                 <a
                   href="#/chat/50000000-0000-4000-8000-000000000001"
-                  target="_blank"
-                  rel="noopener"
                 >
                   {" "}
                   访客端预览 <ArrowUpRight size={13} />
                 </a>
+                <Button variant="ghost" onPress={() => setDemoGuide(true)}>查看演示引导</Button>
+                <Button variant="ghost" onPress={() => {
+                  if (!window.confirm("重置当前标签页中的全部演示数据和访客会话？")) return;
+                  sessionState.removePrefix("");
+                  window.location.hash = "#/dashboard";
+                  window.location.reload();
+                }}>重置演示</Button>
+                {demoGuide && <section className="panel" aria-label="演示引导">
+                  <h2>探索离线客服工作台</h2>
+                  <p>工作区概览提供入口；知识库中的虚构服务指南已关联演示 Agent。</p>
+                  <p>体验完整流程：打开访客端提问 → 返回客服会话并人工接管 → 在访客端继续提问 → 工作台人工回复 → 恢复 AI 后继续对话。访客端与工作台在同一标签页共享演示数据。</p>
+                  <p>可在知识库、Agent 和客服会话中查看配置与处理记录。演示不会连接正式 API 或真实模型。</p>
+                  <Button variant="secondary" onPress={() => { sessionState.set("support.demo.guide.seen", "1"); setDemoGuide(false); }}>知道了 / 跳过</Button>
+                </section>}
               </div>
             )}
             {adapter.mode === "api" &&
@@ -351,8 +341,8 @@ function Workspace() {
                     key={n.path}
                     path={"/" + n.path}
                     element={
-                      n.path === "chat" ? (
-                        <ChatPage />
+                      ["chat", "inbox", "conversations"].includes(n.path) ? (
+                        <ChatPage key={n.path} defaultQueue={n.path === "inbox" ? "pending" : "all"} />
                       ) : (
                         <AdminPage key={n.path} page={n.path} />
                       )

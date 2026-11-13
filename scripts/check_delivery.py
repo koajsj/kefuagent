@@ -1,4 +1,4 @@
-"""Check JavaScript, static Web assets, and installed-wheel contracts."""
+"""Inspect source assets and publication files; optionally inspect an existing wheel."""
 
 import argparse
 import re
@@ -114,6 +114,9 @@ def check_repository():
             "CREDENTIAL_KEYRING",
             "PUBLIC_RATE_KEY",
             "HTTP_RATE_KEY",
+            "S3_ACCESS_KEY",
+            "S3_SECRET_KEY",
+            "S3_SESSION_TOKEN",
         }:
             continue
         if len(value) >= 16:
@@ -163,14 +166,17 @@ def check_repository():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--wheel", type=Path, required=True)
+    parser.add_argument("--wheel", type=Path, help="Inspect an existing wheel; never builds one")
     args = parser.parse_args()
     assets = Path("src/support_agent/web")
     for path in sorted(assets.glob("*.js")):
         subprocess.run(["node", "--check", str(path)], check=True)
     check_assets(assets)
-    check_react_assets(Path("src/support_agent/web-react"))
     check_repository()
+    if args.wheel is None:
+        print("Source assets passed; built React assets and wheel: NOT_RUN")
+        return
+    check_react_assets(Path("src/support_agent/web-react"))
     expected_version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
     with zipfile.ZipFile(args.wheel) as package:
         names = set(package.namelist())

@@ -2,12 +2,13 @@ from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 
-from support_agent.dependencies import resume_context
+from support_agent.dependencies import locked_staff_context
 from support_agent.errors import AppError
 from support_agent.ingestion import MIMES, process_document, validate_upload
 from support_agent.models import Document, DocumentChunk, KnowledgeBase
+from support_agent.retention import KNOWLEDGE_REFERENCE_DEPENDENCIES
 from support_agent.services.audit import record
 from support_agent.services.resources import get_owned
 
@@ -20,6 +21,7 @@ def active_base(db, context, kid, *, lock=False):
 
 
 def create(db, context, data, request):
+    context = locked_staff_context(db, context, request, admin=True)
     base = KnowledgeBase(
         **data.model_dump(), tenant_id=context.tenant_id, created_by=context.user_id
     )
@@ -32,6 +34,7 @@ def create(db, context, data, request):
 
 
 def update(db, context, kid, data, request):
+    context = locked_staff_context(db, context, request, admin=True)
     base = active_base(db, context, kid, lock=True)
     for key, value in data.model_dump().items():
         setattr(base, key, value)
@@ -44,6 +47,7 @@ def update(db, context, kid, data, request):
 
 def upload(db, context, kid, filename, content, request):
     suffix, media = validate_upload(filename, content)
+    context = locked_staff_context(db, context, request, admin=True)
     active_base(db, context, kid, lock=True)
     digest = sha256(content).hexdigest()
     doc = db.scalar(
@@ -54,6 +58,14 @@ def upload(db, context, kid, filename, content, request):
         )
     )
     created = doc is None
+    if doc is not None and doc.media_type != media:
+        raise AppError(
+            409,
+            "document_format_conflict",
+            "Identical content is already registered with a different format. "
+            "Use the existing document; changing its format requires a separately reviewed erasure; "
+            "existing content and references were not changed.",
+        )
     if doc is None:
         doc = Document(
             tenant_id=context.tenant_id,
@@ -74,11 +86,11 @@ def upload(db, context, kid, filename, content, request):
     document_id = doc.id
     # Persist the path-owning row before any file write. A crash leaves a recoverable row, not an orphan.
     db.commit()
-    context = resume_context(db, context, request, admin=True)
     return process(db, context, document_id, request, content=content), created
 
 
 def process(db, context, document_id, request, *, content=None):
+    context = locked_staff_context(db, context, request, admin=True)
     initial = get_owned(db, Document, context, document_id)
     active_base(db, context, initial.knowledge_base_id, lock=True)
     doc = get_owned(db, Document, context, document_id, lock=True)
@@ -90,12 +102,8 @@ def process(db, context, document_id, request, *, content=None):
     storage = request.app.state.storage
     try:
         if content is not None:
-            # Repair only this document's partial file left by an interrupted initial write.
-            if (
-                storage.exists(context.tenant_id, document_id)
-                and storage.read(context.tenant_id, document_id) != content
-            ):
-                storage.delete(context.tenant_id, document_id)
+            # Published objects are immutable. A mismatch requires investigation;
+            # the storage backend reconciles only its own interrupted pending write.
             storage.write(context.tenant_id, document_id, content)
         raw = storage.read(context.tenant_id, document_id)
         if sha256(raw).hexdigest() != doc.sha256:
@@ -104,12 +112,6 @@ def process(db, context, document_id, request, *, content=None):
         doc.status = "failed"
         doc.error_category = "storage_unavailable"
         doc.chunk_count = 0
-        db.execute(
-            delete(DocumentChunk).where(
-                DocumentChunk.tenant_id == context.tenant_id,
-                DocumentChunk.document_id == document_id,
-            )
-        )
         record(
             db,
             request,
@@ -128,15 +130,10 @@ def process(db, context, document_id, request, *, content=None):
     doc.status = "processing"
     doc.error_category = None
     doc.chunk_count = 0
-    db.execute(
-        delete(DocumentChunk).where(
-            DocumentChunk.tenant_id == context.tenant_id, DocumentChunk.document_id == document_id
-        )
-    )
     suffix = next(ext for ext, mime in MIMES.items() if mime == doc.media_type)
     db.commit()
     chunks, error = process_document(raw, suffix)
-    context = resume_context(db, context, request, admin=True)
+    context = locked_staff_context(db, context, request, admin=True)
     current = get_owned(db, Document, context, document_id)
     active_base(db, context, current.knowledge_base_id, lock=True)
     doc = get_owned(db, Document, context, document_id, lock=True)
@@ -147,8 +144,11 @@ def process(db, context, document_id, request, *, content=None):
         doc.error_category = error
     else:
         doc.generation += 1
+        doc.is_published = False
         db.add_all(
             DocumentChunk(
+                id=chunk_id,
+                root_chunk_id=chunk_id,
                 tenant_id=context.tenant_id,
                 document_id=document_id,
                 position=i,
@@ -156,6 +156,7 @@ def process(db, context, document_id, request, *, content=None):
                 **chunk,
             )
             for i, chunk in enumerate(chunks)
+            for chunk_id in [uuid4()]
         )
         doc.chunk_count = len(chunks)
         doc.status = "ready"
@@ -172,199 +173,138 @@ def process(db, context, document_id, request, *, content=None):
         reason=error,
     )
     db.flush()
+    from support_agent.services.vector_index import changed
+
+    changed(db, context.tenant_id, doc.knowledge_base_id)
     return doc
 
 
-def delete_document(db, context, document_id, request):
+def _deletion_preview(db, context, documents, *, remaining, batch_size, status):
+    # No confirmation is issued for an incomplete dependency graph. These are
+    # known candidate objects, not an executable erasure plan or a zero-link claim.
+    ids = [doc.id for doc in documents]
+    chunks = (
+        db.scalar(
+            select(func.count())
+            .select_from(DocumentChunk)
+            .where(
+                DocumentChunk.tenant_id == context.tenant_id,
+                DocumentChunk.document_id.in_(ids),
+            )
+        )
+        if ids
+        else 0
+    )
+    return {
+        "remaining": remaining,
+        "batch_size": batch_size,
+        "status": status,
+        "documents": [
+            {
+                "id": str(doc.id),
+                "filename": doc.filename,
+                "status": doc.status,
+                "generation": doc.generation,
+                "updated_at": doc.updated_at.isoformat(),
+            }
+            for doc in documents
+        ],
+        "chunk_versions": chunks,
+        "executable": False,
+        "blocked_reason": "knowledge_reference_review_required",
+        "confirmation": None,
+        "unknown_dependencies": {name: None for name in KNOWLEDGE_REFERENCE_DEPENDENCIES},
+        "effects": {
+            "deleted": [],
+            "retained": [
+                "documents",
+                "document_chunks",
+                "private_files",
+                "knowledge_bases",
+                "agent_knowledge_bases",
+            ],
+            "requested": ["documents", "all_generations_and_revisions", "private_files"],
+            "unknown": ["historical_answer_and_tool_visibility", "feedback_source_links"],
+        },
+    }
+
+
+def _block_erasure():
+    raise AppError(
+        409,
+        "knowledge_reference_review_required",
+        "Knowledge erasure is blocked: historical JSON references are not fully "
+        "enumerated or bound to confirmation. No data or files were deleted. "
+        "Use preview=true to inspect the known scope; chunk logical deletion remains available.",
+    )
+
+
+def delete_document(db, context, document_id, request, *, preview=False):
     doc = db.scalar(
         select(Document).where(Document.id == document_id, Document.tenant_id == context.tenant_id)
     )
     if doc is None:
-        return
-    base = db.scalar(
-        select(KnowledgeBase)
-        .where(
-            KnowledgeBase.id == doc.knowledge_base_id, KnowledgeBase.tenant_id == context.tenant_id
-        )
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    if base is None:
-        return
-    doc = db.scalar(
-        select(Document)
-        .where(Document.id == document_id, Document.tenant_id == context.tenant_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    if doc is None:
-        return
-    doc.status = "deleting"
-    doc.processing_token = None
-    doc.lease_expires_at = None
-    doc.chunk_count = 0
-    db.execute(
-        delete(DocumentChunk).where(
-            DocumentChunk.tenant_id == context.tenant_id, DocumentChunk.document_id == document_id
-        )
-    )
-    record(
-        db,
-        request,
-        "document.delete_requested",
-        "document",
-        document_id,
-        tenant_id=context.tenant_id,
-    )
-    db.commit()
-    resume_context(db, context, request, admin=True)
-    # Serialize concurrent retries so a late unlink cannot delete a newly uploaded file.
-    doc = db.scalar(
-        select(Document)
-        .where(Document.id == document_id, Document.tenant_id == context.tenant_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    if doc is None:
-        return
-    try:
-        request.app.state.storage.delete(context.tenant_id, document_id)
-    except OSError:
-        raise AppError(
-            503,
-            "storage_cleanup_pending",
-            "Deletion is hidden from retrieval; retry DELETE to finish cleanup",
-        ) from None
-    db.delete(doc)
-    record(db, request, "document.delete", "document", document_id, tenant_id=context.tenant_id)
-    db.flush()
+        return None
+    if preview:
+        return _deletion_preview(db, context, [doc], remaining=1, batch_size=1, status=doc.status)
+    _block_erasure()
 
 
 def delete_base(db, context, kid, request, *, batch_size=25, preview=False):
     base = db.scalar(
-        select(KnowledgeBase)
-        .where(KnowledgeBase.id == kid, KnowledgeBase.tenant_id == context.tenant_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    if base is None:
-        return None
-
-    def remaining():
-        return db.scalar(
-            select(func.count())
-            .select_from(Document)
-            .where(Document.tenant_id == context.tenant_id, Document.knowledge_base_id == kid)
+        select(KnowledgeBase).where(
+            KnowledgeBase.id == kid, KnowledgeBase.tenant_id == context.tenant_id
         )
-
-    if preview:
-        docs = db.scalars(
-            select(Document)
-            .where(Document.tenant_id == context.tenant_id, Document.knowledge_base_id == kid)
-            .order_by(Document.id)
-            .limit(batch_size)
-        ).all()
-        return {
-            "remaining": remaining(),
-            "batch_size": batch_size,
-            "status": base.status,
-            "documents": [
-                {"id": str(doc.id), "filename": doc.filename, "status": doc.status} for doc in docs
-            ],
-        }
-    # The base tombstone hides every chunk immediately, without loading all documents.
-    base.status = "deleting"
-    record(
-        db,
-        request,
-        "knowledge_base.delete_requested",
-        "knowledge_base",
-        kid,
-        tenant_id=context.tenant_id,
-    )
-    db.commit()
-    context = resume_context(db, context, request, admin=True)
-    base = db.scalar(
-        select(KnowledgeBase)
-        .where(KnowledgeBase.id == kid, KnowledgeBase.tenant_id == context.tenant_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
     )
     if base is None:
         return None
+    if not preview:
+        _block_erasure()
     docs = list(
         db.scalars(
             select(Document)
             .where(Document.tenant_id == context.tenant_id, Document.knowledge_base_id == kid)
             .order_by(Document.id)
             .limit(batch_size)
-            .with_for_update()
         )
     )
-    ids = [doc.id for doc in docs]
-    for doc in docs:
-        doc.status = "deleting"
-        doc.processing_token = None
-        doc.lease_expires_at = None
-        doc.chunk_count = 0
+    remaining = db.scalar(
+        select(func.count())
+        .select_from(Document)
+        .where(Document.tenant_id == context.tenant_id, Document.knowledge_base_id == kid)
+    )
+    return _deletion_preview(
+        db, context, docs, remaining=remaining, batch_size=batch_size, status=base.status
+    )
+
+
+def publish_document(db, context, document_id, data, request):
+    context = locked_staff_context(db, context, request, admin=True)
+    initial = get_owned(db, Document, context, document_id)
+    active_base(db, context, initial.knowledge_base_id, lock=True)
+    doc = get_owned(db, Document, context, document_id, lock=True)
+    if (
+        (data.published and doc.status != "ready")
+        or doc.generation != data.expected_generation
+        or doc.updated_at != data.expected_updated_at
+    ):
+        raise AppError(
+            409, "document_changed", "Document version changed; refresh before publishing"
+        )
+    if doc.is_published != data.published:
+        doc.is_published = data.published
+        doc.updated_at = datetime.now(UTC)
         record(
             db,
             request,
-            "document.delete_requested",
+            "document.publish" if data.published else "document.withdraw",
             "document",
             doc.id,
             tenant_id=context.tenant_id,
+            details={"generation": doc.generation},
         )
-    if ids:
-        db.execute(
-            delete(DocumentChunk).where(
-                DocumentChunk.tenant_id == context.tenant_id, DocumentChunk.document_id.in_(ids)
-            )
-        )
-    db.commit()
-    context = resume_context(db, context, request, admin=True)
-    # Stable base -> document lock order serializes retries and prevents a late unlink.
-    base = db.scalar(
-        select(KnowledgeBase)
-        .where(KnowledgeBase.id == kid, KnowledgeBase.tenant_id == context.tenant_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    if base is None:
-        return None
-    docs = list(
-        db.scalars(
-            select(Document)
-            .where(Document.tenant_id == context.tenant_id, Document.id.in_(ids))
-            .order_by(Document.id)
-            .with_for_update()
-        )
-    )
-    for doc in docs:
-        try:
-            request.app.state.storage.delete(context.tenant_id, doc.id)
-        except OSError:
-            raise AppError(
-                503,
-                "storage_cleanup_pending",
-                "Deletion is hidden; retry DELETE to resume the bounded batch",
-            ) from None
-        db.delete(doc)
-        record(db, request, "document.delete", "document", doc.id, tenant_id=context.tenant_id)
-    db.flush()
-    count = remaining()
-    if count:
-        record(
-            db,
-            request,
-            "knowledge_base.delete_progress",
-            "knowledge_base",
-            kid,
-            tenant_id=context.tenant_id,
-            details={"deleted": len(docs), "remaining": count},
-        )
-        return {"status": "deleting", "deleted": len(docs), "remaining": count}
-    db.delete(base)
-    record(db, request, "knowledge_base.delete", "knowledge_base", kid, tenant_id=context.tenant_id)
-    db.flush()
-    return None
+        db.flush()
+    from support_agent.services.vector_index import changed
+
+    changed(db, context.tenant_id, doc.knowledge_base_id)
+    return doc

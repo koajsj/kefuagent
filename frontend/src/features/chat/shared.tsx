@@ -19,14 +19,16 @@ export function Message({
   message: m,
   visitor = false,
   showSourceId = false,
+  highlight = false,
 }: {
   message: Row;
   visitor?: boolean;
   showSourceId?: boolean;
+  highlight?: boolean;
 }) {
   const citations = m.citations || m.metadata?.citations || [];
   return (
-    <article className={`message ${m.role}`}>
+    <article className={`message ${m.role}${highlight ? " message-highlight" : ""}`} id={highlight ? "memory-source" : undefined}>
       <div className="message-label">
         {m.role === "user"
           ? visitor

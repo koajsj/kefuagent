@@ -1,14 +1,24 @@
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from support_agent.db import authorization_gate, private_tenant
 from support_agent.errors import AppError, forbidden, missing
 from support_agent.models import Membership, Tenant, User
 from support_agent.services.audit import record
 
 
 def create_tenant(db: Session, data, request):
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended('private-enterprise-bootstrap', 0))")
+    )
+    if private_tenant(db, allow_empty=True) is not None:
+        raise AppError(
+            409,
+            "private_deployment_initialized",
+            "This private deployment already has its enterprise",
+        )
     user = db.scalar(select(User).where(User.id == data.admin_user_id).with_for_update())
     if not user or user.status != "active":
         raise AppError(
@@ -24,6 +34,7 @@ def create_tenant(db: Session, data, request):
 
 
 def list_tenants(db: Session, user, limit: int, offset: int):
+    private_tenant(db, allow_empty=True)
     query = select(Tenant)
     if not user.is_platform_admin:
         query = query.join(Membership, Membership.tenant_id == Tenant.id).where(
@@ -35,6 +46,8 @@ def list_tenants(db: Session, user, limit: int, offset: int):
 
 
 def set_status(db: Session, tenant_id: UUID, status: str, request):
+    private_tenant(db, tenant_id)
+    authorization_gate(db, tenant_id=tenant_id, exclusive=True)
     tenant = db.scalar(select(Tenant).where(Tenant.id == tenant_id).with_for_update())
     if not tenant:
         raise missing()
@@ -45,6 +58,7 @@ def set_status(db: Session, tenant_id: UUID, status: str, request):
 
 
 def add_member(db: Session, context, data, request):
+    context = _member_authority(db, context, data.user_id, request)
     user = db.scalar(select(User).where(User.id == data.user_id).with_for_update())
     if not user or user.status != "active":
         raise AppError(422, "invalid_member", "Member must be an active existing user")
@@ -93,6 +107,7 @@ def update_member(db: Session, context, membership_id: UUID, data, request):
     )
     if not member:
         raise missing()
+    context = _member_authority(db, context, member.user_id, request)
     db.scalar(select(User).where(User.id == member.user_id).with_for_update())
     _lock_and_recheck_admin(db, context)
     db.refresh(member)
@@ -129,7 +144,22 @@ def update_member(db: Session, context, membership_id: UUID, data, request):
     return member
 
 
+def _member_authority(db, context, target_user_id, request):
+    from support_agent.dependencies import resume_context
+
+    # Membership changes revoke the target's commands. Sort both user gates before
+    # the tenant gate so two administrators changing each other cannot invert locks.
+    for user_id in sorted({context.user_id, target_user_id}, key=str):
+        authorization_gate(db, user_id=user_id, exclusive=user_id == target_user_id)
+    authorization_gate(db, tenant_id=context.tenant_id)
+    context = resume_context(db, context, request)
+    if context.role != "admin":
+        raise forbidden()
+    return context
+
+
 def get_visible_tenant(db: Session, tenant_id: UUID, user):
+    private_tenant(db, tenant_id)
     query = select(Tenant).where(Tenant.id == tenant_id)
     if not user.is_platform_admin:
         query = query.join(Membership, Membership.tenant_id == Tenant.id).where(

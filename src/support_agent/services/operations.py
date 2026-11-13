@@ -2,10 +2,20 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import and_, case, func, or_, select, tuple_
+from sqlalchemy.orm import aliased
 
+from support_agent.dependencies import locked_staff_context
 from support_agent.errors import AppError, forbidden
-from support_agent.models import Collaboration, Conversation, Membership, User
+from support_agent.models import (
+    Collaboration,
+    Conversation,
+    ConversationReadCursor,
+    Membership,
+    Message,
+    ModelCall,
+    User,
+)
 from support_agent.services.audit import record
 from support_agent.services.resources import get_owned
 
@@ -111,6 +121,7 @@ def log(db, context, row, request, kind, details, content=""):
 
 
 def update(db, context, cid, data, request):
+    context = locked_staff_context(db, context, request)
     row = get_owned(db, Conversation, context, cid, lock=True)
     check_version(row, data.expected_version)
     controlled(db, context, row)
@@ -177,6 +188,7 @@ def notes(db, context, cid, limit, offset, before=None):
 
 
 def add_note(db, context, cid, data, request):
+    context = locked_staff_context(db, context, request)
     row = get_owned(db, Conversation, context, cid, lock=True)
     item = log(db, context, row, request, "note", {}, data.content)
     # Notes are not Message objects, never included in transcript, summary or analytics previews.
@@ -185,7 +197,108 @@ def add_note(db, context, cid, data, request):
     return item
 
 
-def listing(db, context, *, limit, offset, q, queue, assignee_id, priority, sort):
+def describe_conversations(db, context, rows):
+    from support_agent.schemas import ConversationOut
+
+    if not rows:
+        return []
+    ids = [row.id for row in rows]
+    anchor = aliased(Message)
+    stats = db.execute(
+        select(
+            Conversation.id,
+            func.max(Message.created_at).filter(Message.role.in_(["user", "assistant"])),
+            func.count(Message.id).filter(
+                Message.role == "user",
+                Conversation.channel == "public",
+                or_(
+                    and_(
+                        Message.source == "manual",
+                        Message.message_metadata.has_key("visitor_session_id"),
+                    ),
+                    and_(Message.source == "agent", ModelCall.visitor_session_id.is_not(None)),
+                ),
+                or_(
+                    anchor.id.is_(None),
+                    tuple_(Message.created_at, Message.id) > tuple_(anchor.created_at, anchor.id),
+                ),
+            ),
+        )
+        .outerjoin(
+            Message,
+            and_(
+                Message.tenant_id == Conversation.tenant_id,
+                Message.conversation_id == Conversation.id,
+            ),
+        )
+        .outerjoin(
+            ModelCall,
+            and_(ModelCall.tenant_id == Message.tenant_id, ModelCall.id == Message.model_call_id),
+        )
+        .outerjoin(
+            ConversationReadCursor,
+            and_(
+                ConversationReadCursor.tenant_id == Conversation.tenant_id,
+                ConversationReadCursor.conversation_id == Conversation.id,
+                ConversationReadCursor.user_id == context.user_id,
+            ),
+        )
+        .outerjoin(
+            anchor,
+            and_(
+                anchor.tenant_id == ConversationReadCursor.tenant_id,
+                anchor.id == ConversationReadCursor.message_id,
+            ),
+        )
+        .where(Conversation.tenant_id == context.tenant_id, Conversation.id.in_(ids))
+        .group_by(Conversation.id)
+    ).all()
+    by_id = {cid: (activity, count) for cid, activity, count in stats}
+    return [
+        ConversationOut.model_validate(row).model_copy(
+            update={
+                "unread_count": by_id[row.id][1],
+                "last_activity_at": by_id[row.id][0],
+            }
+        )
+        for row in rows
+    ]
+
+
+def read_cursor(db, context, cid, message_id):
+    from support_agent.errors import missing
+
+    get_owned(db, Conversation, context, cid, lock=True)
+    message = get_owned(db, Message, context, message_id)
+    if message.conversation_id != cid:
+        raise missing()
+    cursor = db.scalar(
+        select(ConversationReadCursor)
+        .where(
+            ConversationReadCursor.tenant_id == context.tenant_id,
+            ConversationReadCursor.conversation_id == cid,
+            ConversationReadCursor.user_id == context.user_id,
+        )
+        .with_for_update()
+    )
+    if cursor:
+        previous = get_owned(db, Message, context, cursor.message_id)
+        if (message.created_at, message.id) > (previous.created_at, previous.id):
+            cursor.message_id = message.id
+            cursor.updated_at = datetime.now(UTC)
+    else:
+        cursor = ConversationReadCursor(
+            tenant_id=context.tenant_id,
+            conversation_id=cid,
+            user_id=context.user_id,
+            message_id=message.id,
+        )
+        db.add(cursor)
+    db.flush()
+    return {"message_id": cursor.message_id}
+
+
+def listing(db, context, *, limit, offset, q, queue, assignee_id, priority, sort, tag=None):
     stmt = select(Conversation).where(Conversation.tenant_id == context.tenant_id)
     if q:
         stmt = stmt.where(Conversation.subject.icontains(q, autoescape=True))
@@ -201,12 +314,54 @@ def listing(db, context, *, limit, offset, q, queue, assignee_id, priority, sort
         stmt = stmt.where(Conversation.assignee_id == assignee_id)
     if priority:
         stmt = stmt.where(Conversation.priority == priority)
-    order = (Conversation.created_at, Conversation.id)
-    return db.scalars(
-        stmt.order_by(*(c.desc() for c in order) if sort == "newest" else order)
-        .limit(limit)
-        .offset(offset)
-    ).all()
+    if tag:
+        stmt = stmt.where(Conversation.tags.contains([tag]))
+    activity = (
+        select(func.max(Message.created_at))
+        .where(
+            Message.tenant_id == Conversation.tenant_id,
+            Message.conversation_id == Conversation.id,
+            Message.role == "user"
+            if sort == "customer_activity"
+            else Message.role.in_(["user", "assistant"]),
+        )
+        .correlate(Conversation)
+        .scalar_subquery()
+    )
+    activity = func.coalesce(activity, Conversation.created_at)
+    priority_rank = case(
+        (Conversation.priority == "urgent", 0),
+        (Conversation.priority == "high", 1),
+        (Conversation.priority == "normal", 2),
+        else_=3,
+    )
+    if sort in {"activity", "customer_activity"}:
+        order = (activity.desc().nullslast(), Conversation.id.desc())
+    elif sort == "priority":
+        order = (priority_rank, activity.desc().nullslast(), Conversation.id.desc())
+    elif sort == "sla":
+        age = func.extract("epoch", func.now() - Conversation.created_at)
+        wait_age = func.extract("epoch", func.now() - Conversation.waiting_since)
+        response_limit = case((Conversation.priority == "urgent", 60.0), else_=300.0)
+        resolution_limit = case((Conversation.priority == "urgent", 3600.0), else_=86400.0)
+        ratio = func.greatest(
+            case((Conversation.first_response_at.is_(None), age / response_limit), else_=0),
+            case((Conversation.support_state == "waiting", wait_age / response_limit), else_=0),
+            age / resolution_limit,
+        )
+        order = (
+            case((Conversation.status == "open", 0), else_=1),
+            ratio.desc(),
+            Conversation.id.desc(),
+        )
+    else:
+        order = (
+            (Conversation.created_at.desc(), Conversation.id.desc())
+            if sort == "newest"
+            else (Conversation.created_at, Conversation.id)
+        )
+    rows = db.scalars(stmt.order_by(*order).limit(limit).offset(offset)).all()
+    return describe_conversations(db, context, rows)
 
 
 def public_reply_guard(db, context, row, request):

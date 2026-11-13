@@ -4,7 +4,7 @@
 
 ## Linux 首次安装
 
-使用 Python 3.11–3.14、PostgreSQL 15+、uv。以普通系统账号运行；应用目录与存储目录只对服务账号可写。
+使用 Python 3.11–3.14、PostgreSQL 15+、pgvector 和 uv。0018 前须由独立受控维护身份安装并启用扩展，具体配置见下文「pgvector 与隔离 Compose」。以普通系统账号运行；应用目录与存储目录只对服务账号可写。
 
 ```bash
 git clone https://github.com/koajsj/kefuagent.git
@@ -46,7 +46,7 @@ path.chmod(0o600)
 PY
 ```
 
-配置 WEB_ORIGIN 为最终 HTTPS 地址（无路径），DOCUMENT_STORAGE_ROOT 为服务账号私有的绝对目录；MODEL_ALLOWED_HOSTS 是精确主机 JSON 数组，例如 `["api.provider.example"]`。只支持批准公网 HTTPS:443，私网、回环模型服务不支持。ALLOW_EXTERNAL_MODELS 保持 false 进行离线验收；部署方自行确认供应商和费用后才开启真实调用，本阶段没有执行。
+配置 WEB_ORIGIN 为最终 HTTPS 地址（无路径），DOCUMENT_STORAGE_ROOT 为服务账号私有的绝对目录；MODEL_ALLOWED_HOSTS 是精确主机 JSON 数组，例如 `["api.provider.example"]`。默认仅连接公网 HTTPS:443；私有兼容模型须将精确 DNS 主机同时列入 MODEL_ALLOWED_HOSTS 和 MODEL_PRIVATE_HOSTS，并在 HTTPS:443 提供有效证书（可通过企业受控反向代理）。不开放任意端口、HTTP、重定向或环境代理，链路本地/元数据地址仍拒绝。ALLOW_EXTERNAL_MODELS 保持 false 进行离线验收；部署方自行确认供应商和费用后才开启真实调用，本阶段没有执行。
 
 经目标数据库负责人授权后迁移（服务不会自动迁移）：
 
@@ -136,7 +136,7 @@ pg_restore --exit-on-error --single-transaction --host=DB_HOST --username=RESTOR
 
 P7 提供版本化 keyring 与维护窗口轮换/恢复 CLI，见 [P7 运行维护](P7_RUNTIME.md)。必须保留旧密钥，不能直接替换唯一环境变量；该流程不等于无停机密钥分发。普通企业 API Key 更新已实现；在途配置/凭证变化会阻止旧结果交付。
 
-数据默认保留；文档/知识库与凭证由管理员显式删除，公开入口可下线/撤销。访客 Token 过期不自动删除会话、审计或幂等记录。备份保留期、完整隐私擦除、生产容量与生产恢复演练需部署方另行确认。P7 可按显式保留策略预览、确认和有界清理，默认没有自动任务或生产部署。
+数据默认保留；凭证由管理员显式删除，公开入口可下线/撤销。文档/知识库物理删除因历史 JSON 引用依赖未完整预览而 BLOCKED；仅提供已知影响预览，不清理历史修订或文件。访客 Token 过期不自动删除会话、审计或幂等记录。备份保留期、完整隐私擦除、生产容量与生产恢复演练需部署方另行确认。P7 可按显式保留策略预览、确认和有界清理，默认没有自动任务或生产部署。
 
 P6 本机演练使用现有测试库的只读 schema 副本，在全新随机数据库中经 CLI 初始化管理员、录入模拟业务，停止应用后执行 custom-format pg_dump，再 pg_restore --exit-on-error 到另一个空库；文档复制到新的私有目录，用对应模拟主密钥验证解密。表记录数、文档 SHA-256、迁移版本、14 张表的 FORCE RLS 和策略均核对。原 dev/test 行数、原文档及 .env 哈希保持一致；新演练库与 0700/0600 证据保留在本机，未上传。不等于已执行从零迁移或生产灾难切换。详见 [验收记录](ACCEPTANCE.md)。
 
@@ -156,10 +156,104 @@ React 源码更新后必须重新执行正式构建，再构建 wheel 或镜像�
 
 ## P15-C 部署交接
 
-当前迁移 head 是 `0011_user_memory`；已有部署升级须另行授权，先按上文完成一致备份，再审查增量迁移和新增表的运行权限。`user_memory_consents`、`user_memories` 两表均须授予运行角色必要 CRUD，并核对 ENABLE/FORCE RLS 与同时约束 tenant 和 user 的策略。不要使用自动 downgrade 作为回滚：0011 的 downgrade 会删除用户记忆和同意记录；回退应由 DBA 制定经审查的数据保留与恢复方案。
+当前源码迁移 head 为 `0020_conversation_idempotency`，本次未应用到任何数据库；0020 兼容性见下方专节。已有部署须另行授权升级，先完成一致备份并审查增量 SQL。0013 保留原主键，验证 Publication 与 PublicRoute 同租户；历史不一致会使迁移事务失败，不能自动重分配。Chunk 根 ID 在现有 FORCE RLS 下逐企业回填，不关闭策略、不使用 BYPASSRLS；迁移身份须有 DDL、tenant 枚举和必要 UPDATE 权限，不将其配置交给 HTTP 服务。回填不完整将被 NOT NULL 约束拒绝。0014–0016 新增客户、关联、工单、事件、提醒、附件和客户记忆共七表，须授予运行角色必要 CRUD 并保留 FORCE RLS；不授予 RLS 旁路。
+
+`user_memory_consents`、`user_memories`、`conversation_read_cursors` 仍须必要 CRUD 和 ENABLE/FORCE RLS 的 tenant + user 策略。0012 的历史隔离验证不代表 0013 已执行或兼容性验收。0013 移除旧的全代次 document/position 唯一键，建立版本及当前行约束，保留旧代和人工修订；数据增长须纳入备份容量计划。不能在线同时运行新旧知识写入代码，升级时停止写入/排空处理任务。0013 downgrade 明确阻断；回退需独立的数据保全方案。
 
 Compose 的 app 宽限停止时间设为 180 秒，供 Uvicorn 收到终止信号后排空请求；这不是保证外部调用或工具执行完成。先关闭入口并等待在途请求与文档操作完成，再停止 app，确认退出后才停止数据库。超过宽限期会被强制结束，未知结果须查记录并按原幂等键协调，不盲目重发。镜像通过 exec 形式启动 Uvicorn，运行 UID 10001；新卷初始化的目录权限和已有卷的 UID、权限应在目标环境核实。不要通过递归修改或清空已有卷解决权限问题。
 
 上线入口至少配置 HTTPS、精确 Origin、代理拒绝未知 Host 并固定上游 Host、覆盖转发头、代理速率与连接限制，并启用 `HTTP_LIMITS_ENABLED=true` 和所有实例一致的 `HTTP_RATE_KEY`（或按配置使用 `PUBLIC_RATE_KEY`）。限制密钥、阈值及代理信任范围必须一致；预检无法替代对真实代理和直连路径的验证。详细交接、恢复闸门和责任见 [P15-C 运维交接](P15_C_OPERATIONS.md)。
 
 健康检查连接容器回环地址但使用 `WEB_ORIGIN` 的域名及端口作为 Host；系统外探针也应使用该规范 Host。应用 Host 校验按配置的 hostname 执行；反向代理应拒绝未知 Host 并固定发送规范域名，核查其他虚拟主机是否允许绕过。
+
+
+## 私有部署新增能力（0014–0016，未执行）
+
+一个实例只允许一个企业；初始化后不再创建第二企业。已有多企业库会拒绝启动/业务访问，须由运维另外审查拆分，不自动迁移、合并或删除数据。身份、成员、tenant_id 与复合 FK 保留。
+
+本地模式沿用 DOCUMENT_STORAGE_ROOT。S3 模式设置 DOCUMENT_STORAGE_BACKEND=s3、S3_ENDPOINT（HTTPS 原点）、S3_BUCKET、S3_REGION、S3_PREFIX，以及受保护的 S3_ACCESS_KEY/S3_SECRET_KEY，可选 S3_SESSION_TOKEN。部署账号仅授予指定 bucket/prefix 的读取和条件新增；上传只使用服务生成的 tenant/UUID 键。普通 path-style S3 兼容端点需支持 SigV4 与 If-None-Match 条件 PUT；目录 bucket/特殊端点未支持。412 后核对相同内容，未知写入结果保留 DB 登记并以原键重试。禁止把 bucket 暴露公开读取。参考 [AWS 条件写入](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html) 与 [SigV4 请求格式](https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html)。当前只有静态实现，实际兼容性、IAM、TLS、故障和版本策略待验收。
+
+对象存储不能用目录备份代替：在停写/排空窗口记录 DB 批次、bucket/prefix、对象版本清单与摘要、生命周期、加密配置及恢复所需的密钥。先恢复到全新隔离 bucket/prefix，不能直接连接生产对象位置。S3 凭证不等于数据加密密钥。版本感知物理删除继续 BLOCKED，配置生命周期不能作为完整隐私擦除证明。
+
+可选 Worker 使用与 app 相同镜像、运行角色和受保护环境，通过 `docker compose --profile worker up -d` 启用；本轮没有执行该命令、构建镜像或启动容器。也可由进程管理器运行 `python -m support_agent.worker --interval 30`，或用 `--once` 执行单批。每批最多 100 张逾期工单和 100 条过期客户记忆；SKIP LOCKED、唯一提醒键避免并行重复。提醒仅为站内持久记录，不承诺外部送达；新加入/恢复的接收人可补发当前版本提醒。前端工单页提供查看和已读操作。记忆到期立即从读取接口过滤，Worker 只清除此份引用正文，保留来源/摘要墓碑，原消息和备份保留。
+
+维护、备份、升级和恢复前停入口、排空 app，再停 Worker；恢复后核对未来/逾期工单、提醒去重、记忆有效期与撤回墓碑。Worker 失败输出固定分类，不打印 SQL、客户正文或凭证；需要运维监控进程、错误分类和积压。尚无可验证的 Worker 健康时间戳，管理端显示 UNKNOWN。0013–0016 不提供自动破坏式 downgrade；回滚应用需要匹配 Schema 的隔离保全方案。
+
+
+## 专项 A 升级闸门（0017，未执行）
+
+本节是待单独授权的升级清单，本轮没有启动服务或执行 SQL。先停入口、排空 app/Worker，完成可恢复的一致备份；核对目标库真实 revision 与约束，审查完整0001–0017链。0014/0016为本工作区未提交草稿，已修复默认唯一键重名；如果目标库已执行任何草稿，先独立比对实际结构，不能自动 stamp、重跑或修改其历史记录。
+
+0017新增 erasure_requests、tool_approvals、budget_policies、cost_reservations、widget_sites、widget_bootstraps；运行角色需六表必要 CRUD，保留 ENABLE/FORCE tenant RLS，不授予 owner/superuser/BYPASSRLS。VisitorSession 新网站复合 FK 和 ToolExecution tenant+id 唯一键均保留约束；原 owner RLS 不变。运行身份不得使用迁移身份。备份范围须包含六表及与 DB 一致的 Keyring，不能丢弃原有成本占用或一次性审批记录。
+
+升级有两项默认阻断变化：
+
+- **付费模型**：没有启用的管理员金额策略，一律不派发（包括连接诊断）。MODEL_PRICES 须配置 context_window_tokens、cost_bound_verified=true、含时区 valid_until，并核实生效时间、币种、所有费用项及供应商强制 Token 上界；未确认保持关闭。管理员审核价格目录摘要并配置 Run/日/月/累计及可选 Agent 限额；重新配置价格后需再次审核策略。原 Token 配额仍有效。多实例须使用一致价格目录，否则不匹配实例拒绝调用；未知费用预留跨期保留，无自动对账释放。内部预算不替代供应商硬配额。
+- **正式 Widget**：旧无网站绑定的 Visitor、无签名直链和仅 data-agent 的嵌入代码失效。设置固定部署 UUID `WIDGET_INSTANCE_ID`，所有实例共用 HTTPS WEB_ORIGIN、PUBLIC_RATE_KEY 和 Keyring；登记并验证网站，启用后取得最新集成配置，由网站真实后端按[签名协议](WEBSITE_INTEGRATION.md)签发。PUBLIC_RATE_KEY/实例 UUID 轮换会撤销旧凭证。网站后端必须实施本站授权/CSRF/限流，不向浏览器暴露密钥。不要用放宽 CORS 或取消网站验证恢复旧接入。
+
+R3 固定事务命令至少需要另一位活动管理员；单管理员部署不能自批。Keyring 轮换现在覆盖模型凭证、审批参数、网站密钥，仍须停止旧配置进程并保留备份所需旧密钥。完整擦除当前 BLOCKED，任务登记不能作为数据已撤权/清除凭证。
+
+恢复必须在隔离环境核对账本未决占用、审批执行记录、网站版本/nonce/一次性凭证及密钥一致性，再验证撤权与恢复重放；备份过期和删除抑制尚无可执行全链路保证。未经上述运行验收不得开放生产或宣称安全专项已上线。
+
+
+## 专项 B 升级闸门（0018，未执行）
+
+以下仅为操作员将来获得单独授权后的步骤，本轮未执行。保持 A 的 0017、R3、金额预算及 Widget 身份协议；该专项当时的 head 为 `0018_core_products`，44 张 ORM 表、37 张 RLS 表。
+
+- 0018 前必须由受控数据库维护身份安装兼容 PostgreSQL 的 **pgvector** 扩展并启用 `vector`。迁移只检查扩展存在，不给应用扩展安装权、不自动安装、不放宽 FORCE RLS。基础 Compose 的 `postgres:17` 原镜像没有提供这一前提；现提供下文显式选择的新隔离卷配置，已有环境须单独审查受控安装方案，不能直接切换原卷。本轮未替换运行中镜像或运行容器。余弦/HNSW 与 RRF 的依据见 [pgvector 官方文档](https://github.com/pgvector/pgvector)。
+- 离线审查完整 0001–0018 SQL，备份数据库、存储及 Keyring；先停入口并排空 app/Worker，再经授权升级。0018 只增加四表及 ModelCall.kind 枚举，不修改既有记录；运行角色需四表必要 CRUD，保留 tenant FORCE RLS/复合 FK，不使用 owner/BYPASSRLS。没有自动 downgrade。
+- Embedding 当前固定 **1536 维**，兼容 `/embeddings` 的 `dimensions` 参数和浮点返回。知识库索引绑定 Agent、模型、精确端点和索引版本；查询 Agent 需使用相同已批准端点，并有此 KB 授权。不同端点显式降级关键词，不能混用向量空间。无价格、失效价格、未确认成本上界、未启用金额策略均拒绝付费请求；须同时配置 Embedding 模型和回答/重排模型的价格。Embedding 用量未知继续占用预算，重排采用已有 LLM，无新增供应商适配器。
+- 产品任务默认关闭。经授权的进程管理器可使用 `python -m support_agent.worker --product-jobs --interval 30`；现有 Compose worker 默认命令仍只处理提醒/记忆到期，启用 B 需显式覆盖 command 加入 `--product-jobs`，本轮没有启动。每轮各处理一个清理、导出、草稿和一个 Chunk 索引批次，复用应用角色、存储与预算，不新增队列服务。
+- 后台任务绑定申请人的真实 AuthSession，注销、到期、成员/Agent/知识授权撤销会阻断；管理员重新登录后可显式重排索引或重新确认导出。未知付费执行不自动重试或释放金额；不配长期服务用户来绕过撤权。
+- 导出仅申请管理员本人下载，默认24小时；一个任务最多10万导出记录、每类1万关联、512MiB ZIP，超限失败，不发布部分结果。JSONL 逐行写入一致快照，附件分批校验；存储分片4MiB且先登记所有权。临时 ZIP 使用匿名 TemporaryFile，下载流结束关闭，进程退出由 OS 回收，不留下具名临时客户副本。
+- 本地文件到期由产品 Worker 幂等清理。现有 S3 接口没有版本感知删除，因此 **S3 导出物理清理 BLOCKED**，记录 CLEANUP_BLOCKED/保留分片清单并重试，到期独立禁止下载；需经授权实现并验证所有对象版本、复制及保留规则后解除。不能以过期链接声称物理擦除。备份/供应商副本仍依现有独立保留策略，不属于导出包。
+
+运行验收尚未执行：扩展/索引计划、实际 RLS/并发/升级、供应商1536维及用量、Worker中断/撤权、下载完整性/到期、本地/S3清理、人工草稿发送与浏览器交互均为 NEEDS_RUNTIME_VERIFICATION。
+
+
+## 第一阶段升级闸门（0019，未执行）
+
+0019 增加 5 个唯一键、14 个复合外键和 1 个 CHECK，绑定调用的会话/Agent、访客的会话/站点以及后台任务申请人的认证会话。历史迁移、RLS、权限和既有 ON DELETE 均保留；不一致历史行将阻止升级，不自动修复、清理或 stamp。须先由操作员独立审查 SQL、既有数据及索引开销、停写排空和一致备份，再另行授权迁移；本轮没有执行上述操作。
+
+人工消息 POST /conversations/{id}/messages 现在要求 UUID idempotency_key；同账号/会话同键同内容返回原消息，不同内容 409。React、旧界面和 Demo 已同步；外部客户端须同步字段。草稿采纳继续以草稿状态、版本与稳定消息键防重复。
+
+新模型输入保存有界、扁平化知识依赖；旧助手内容无法补证时保留原记录但拒绝交付/模型继承，原始用户问题可继续用于上下文。新历史复用只接受当前修订；历史来源交付仍遵循同代有效 lineage、当前发布及授权，逻辑删除/撤回/换代会遮蔽。已人工发送的 AI 草稿仍保留来源关系，不因 Message.source=manual 绕过撤权。
+
+Token 在每次付费派发前按已核验 context_window_tokens 加输出上限逐步预留；明确零派发释放，完整 usage 结算，未知保留。日口径为请求起始 UTC 日，运行中/未知占用跨日保留，旧请求跨 UTC 日不再派发新步骤。供应商边界和真实账单须另验；旧未知预留不能据静态修改推定足额，须操作员复核后再开放付费调用。
+
+本地存储用同 UUID 的 .pending 路径写完/fsync 后无覆盖发布；重试可协调本轮机制留下的 pending。旧版最终路径已经存在的不同内容不会自动覆盖，需人工审查；S3 全版本物理删除、完整擦除和备份清理仍 BLOCKED。详见[第一阶段报告](FINALIZATION_PHASE_1.md)。
+
+## 会话创建幂等升级（0020，未执行）
+
+`0020_conversation_idempotency` 接在 0019 后，只给 `conversations` 增加两个可空列 `idempotency_key` / `input_digest`、一个 `(tenant_id, created_by, idempotency_key)` 唯一约束及成对非空/64 位十六进制摘要 CHECK。不回填或猜测历史创建身份；历史行和访客独立认证创建保持双 NULL，员工 API 新建必须写入二者。表级 FORCE RLS、外键、角色与权限不变，无新增表。旧应用不能绕过 head 检查运行，新应用也不能连接 0019 库；必须停写排空、审查索引/DDL 锁开销、备份、另行授权升级后协调发布，不支持新旧版本混跑。本轮没有执行上述操作。
+
+员工 `POST /api/v1/conversations` 必须包含 UUID `idempotency_key`；缺少时返回 422。稳定键范围是企业 + 已认证创建人 + 该键，输入摘要基于版本 1 与经过 Schema 规范化的 subject/channel（包括默认值）。同范围、同键、同输入返回同一会话的**当前状态**，不同输入 409；不同创建人/企业独立，不能用别人的键重放其会话。首次与重放均保持原 201 状态码和 ConversationOut，内部键/摘要不出现在该响应。关闭、分配或后续更新不会在重放时回退；原始摘要不按当前标题重新计算。
+
+每次创建/重放先重新验证 Session、成员与企业，依次持有授权共享门、请求范围事务锁；会话、幂等列和首次审计一起提交，重放另记无正文审计。不调用模型，不自动换键重试。锁等待失败、提交结果未知或响应丢失均保留原键，客户端应显式同键重试。唯一约束提供最终数据库防重；真实事务隔离、并发和中断恢复仍需新隔离库人工确认。
+
+React、旧网页和静态 Demo 已同步。两个正式界面按企业/用户/规范化输入摘要在标签页保存未确认请求键，正文不额外存入该记录；修改输入后再改回也保留原键。仅确认创建响应成功后清理；错误不自动重试。允许 sessionStorage 时刷新后同输入可复用；浏览器存储不可用仅有内存回退，失败时明确提醒不要刷新、先核对列表。退出登录、清理存储、关闭标签页和跨设备不保证恢复原键；外部客户端须自行持久保存并复用同一操作的键，不以标题相同判定同一业务意图。
+
+应用引擎显式使用 `READ COMMITTED`：每条后续查询读取自己的语句快照，避免数据库默认被改成 `REPEATABLE READ` 时，等到请求锁后仍看不到先前创建结果或权限变更。依据为 [PostgreSQL 事务隔离规则](https://www.postgresql.org/docs/current/transaction-iso.html)与 [SQLAlchemy 引擎隔离级别参数](https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#transaction-isolation-level)；这是源码声明，不是目标数据库实测。导出任务仍在独立事务显式使用 `REPEATABLE READ`，未改其快照。创建在拿到请求锁后再次 resume_context，处理等待期间自然到期的 Session；额外校验保留，不用少查几次数据库换取过期授权。既有授权门仍先于请求锁，创建服务不自行提交，最终由 function-scope get_db 在响应发送前提交/失败回滚。锁等待/死锁/连接故障不会被包装成幂等成功，也不自动重放事务。
+
+客户端仅在当前页面仍有效、响应含合法会话 UUID 且企业/创建人匹配时确认并清理请求键；页面已离开或响应不完整时继续保留，使用原键显式核对。确认创建后，列表/详情加载失败单独提示“已创建”，旧界面列表刷新失败仍尝试打开。React/旧 API Client 统一在异步响应交付时检查当前代次和取消信号，SSE 释放流之后再次检查；取消/切换账号后的终态不再触发成功处理。取消仅停止客户端接收，不证明服务端已回滚，不能据此换键重复创建或发送消息。
+
+幂等身份随会话保留，无 TTL 或后台清理，不能根据审计保留期删除。将来获批物理删除会话时，必须另行审查幂等墓碑和删除后重放规则；本轮完整擦除继续 BLOCKED。摘要不是匿名化证明，也不是替代原始输入校验的授权。不得把它公开或复制到日志。
+
+升级操作员须核对新增列的 SELECT/INSERT 权限（现有表级授权通常覆盖新增列；列级授权需单独评审）、RLS 与唯一约束；不向运行角色增加 DDL 或 BYPASSRLS 权限。回滚不能直接 drop 列丢弃已接受请求的身份，down_revision 仅供图关系，downgrade 明确阻断并等待独立回滚审查。不能声称新增迁移已经应用。
+
+## pgvector 与隔离 Compose
+
+基础 `compose.yaml` 保持原镜像。新部署可显式叠加 [docker/compose.pgvector.yaml](../docker/compose.pgvector.yaml)：固定 `pgvector/pgvector:0.8.7-pg17-bookworm`，即 PostgreSQL 17 / Debian Bookworm / pgvector 0.8.7。标签及构建来源已对照 [pgvector v0.8.7 官方说明](https://github.com/pgvector/pgvector/blob/v0.8.7/README.md#docker)和 [Dockerfile](https://github.com/pgvector/pgvector/blob/v0.8.7/Dockerfile)；未拉取镜像，实际补丁版、架构、digest、扩展加载与运行兼容性仍须在隔离环境确认。部署前记录拉取的 digest，不能将版本标签当作镜像内容不可变证明。
+
+叠加配置强制提供 `PGVECTOR_DATA_VOLUME`、`PGVECTOR_DOCUMENT_VOLUME`，两者均须是操作员确认不存在的新卷名，Compose 项目名也须全新。配置不会自动验证名称未占用；授权前由操作员核实，不能指向已有业务卷、备份或另一实例。另建受保护 `.env.compose`、新秘密文件和独立密钥；不能复制生产凭证、文档目录或数据库连接。以下只是**获授权后**的操作示例，本轮未执行：
+
+```bash
+export PGVECTOR_DATA_VOLUME=YOUR_NEW_UNUSED_DB_VOLUME
+export PGVECTOR_DOCUMENT_VOLUME=YOUR_NEW_UNUSED_DOCUMENT_VOLUME
+export KEFU_ISOLATED_PROJECT=your-new-unused-project
+docker compose -p "${KEFU_ISOLATED_PROJECT:?Set a new unused project name}" -f compose.yaml -f docker/compose.pgvector.yaml up -d db
+```
+
+镜像安装扩展文件，不会自动在库中启用。由独立数据库维护身份连接已确认的新隔离库，另行批准后执行 `CREATE EXTENSION vector;`，核对 `pg_extension.extversion` 为 `0.8.7`、实际 PostgreSQL 17 版本及 HNSW 支持。应用和迁移角色不获扩展安装权，运行角色保持非 owner、NOSUPERUSER/NOBYPASSRLS 及最小业务权限。先启用扩展，再以单独的迁移配置按 0001–0020 顺序升级；所有后续命令都必须保留相同新项目、两个配置文件和新卷变量，迁移时额外叠加 `docker/compose.migration.yaml`。
+
+此配置是隔离新部署的可审阅方案，不能证明现有数据库可原地升级；已有 PostgreSQL 的大版本、发行版、locale、扩展和备份恢复需单独审查，不自动更换镜像、挂载旧卷或删除卷。非 Docker 环境由 DBA 为目标 PostgreSQL 安装匹配的 pgvector；本机 INIT 脚本不承担扩展安装。Python 3.11–3.14 与 PostgreSQL 15+ 是源码兼容声明，本轮没有实际版本矩阵证据。

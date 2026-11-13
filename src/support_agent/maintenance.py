@@ -42,18 +42,23 @@ def audit(db, tenant_id, action, details, *, outcome="success", reason=None):
     )
 
 
-def credential_rows(db, tenant_id, *, lock=False):
-    stmt = (
-        select(ModelCredential)
-        .where(ModelCredential.tenant_id == tenant_id)
-        .order_by(ModelCredential.id)
-        .limit(1001)
-    )
-    if lock:
-        stmt = stmt.with_for_update().execution_options(populate_existing=True)
-    rows = db.scalars(stmt).all()
-    if len(rows) > 1000:
-        raise ValueError("Rotation exceeds the reviewed 1000-credential transaction limit")
+def encrypted_rows(db, tenant_id, *, lock=False):
+    from support_agent.models import ToolApproval, WidgetSite
+
+    rows = []
+    for model, field, prefix in (
+        (ModelCredential, "encrypted_secret", None),
+        (ToolApproval, "encrypted_arguments", "approval:"),
+        (WidgetSite, "encrypted_secret", "widget-site:"),
+    ):
+        stmt = select(model).where(model.tenant_id == tenant_id).order_by(model.id).limit(1001)
+        if lock:
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
+        rows.extend(
+            (row, field, (prefix + str(row.id)) if prefix else row.ref) for row in db.scalars(stmt)
+        )
+        if len(rows) > 1000:
+            raise ValueError("Rotation exceeds the reviewed 1000-envelope transaction limit")
     return rows
 
 
@@ -61,15 +66,21 @@ def rotation_plan(db, tenant_id, ring, target, *, check=False):
     scope(db, tenant_id, "credential-rotation", shared=True)
     if target not in ring.keys:
         raise AppError(503, "credential_key_unavailable", "Target key version unavailable")
-    rows = credential_rows(db, tenant_id)
+    rows = encrypted_rows(db, tenant_id)
     counts = {}
-    for row in rows:
-        version = ring.version(row.encrypted_secret)
+    for row, field, ref in rows:
+        version = ring.version(getattr(row, field))
         counts[version] = counts.get(version, 0) + 1
         if check:
-            ring.open(tenant_id, row.ref, row.encrypted_secret)
+            ring.open(tenant_id, ref, getattr(row, field))
     snapshot = [
-        (str(row.id), hashlib.sha256(row.encrypted_secret.encode()).hexdigest()) for row in rows
+        (
+            row.__tablename__,
+            str(row.id),
+            field,
+            hashlib.sha256(getattr(row, field).encode()).hexdigest(),
+        )
+        for row, field, ref in rows
     ]
     return {
         "tenant_id": str(tenant_id),
@@ -84,7 +95,7 @@ def rotation_plan(db, tenant_id, ring, target, *, check=False):
 def rotate_credentials(db, tenant_id, ring, target, confirm):
     # Caller must stop old-config processes; the DB lock serializes this tenant's credential writes.
     scope(db, tenant_id, "credential-rotation")
-    rows = credential_rows(db, tenant_id, lock=True)
+    rows = encrypted_rows(db, tenant_id, lock=True)
     plan = rotation_plan(db, tenant_id, ring, target, check=True)
     if plan["confirmation"] != confirm:
         raise ValueError("Credential set changed; preview and confirm again")
@@ -94,14 +105,14 @@ def rotate_credentials(db, tenant_id, ring, target, confirm):
         .where(ModelCall.tenant_id == tenant_id, ModelCall.status == "running")
     ):
         raise ValueError("Drain/reconcile running calls before rotating credentials")
-    for row in rows:
-        if ring.version(row.encrypted_secret) == target:
+    for row, field, ref in rows:
+        if ring.version(getattr(row, field)) == target:
             continue
-        secret = ring.open(tenant_id, row.ref, row.encrypted_secret)
-        encoded = ring.seal(tenant_id, row.ref, secret, version=target)
-        if ring.open(tenant_id, row.ref, encoded) != secret:
+        secret = ring.open(tenant_id, ref, getattr(row, field))
+        encoded = ring.seal(tenant_id, ref, secret, version=target)
+        if ring.open(tenant_id, ref, encoded) != secret:
             raise RuntimeError("Credential re-encryption verification failed")
-        row.encrypted_secret = encoded
+        setattr(row, field, encoded)
     audit(db, tenant_id, "credential.rotate", {"target": target, "count": plan["affected"]})
     db.flush()
     db.commit()

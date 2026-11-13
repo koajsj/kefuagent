@@ -34,6 +34,83 @@ def text_metrics(arguments: dict, context: ExecutionContext) -> dict:
     return {"characters": len(text), "words": len(text.split())}
 
 
+# Snapshot payloads are injected by the server after schema and authorization checks.
+EMPTY_PARAMETERS = {"type": "object", "properties": {}, "additionalProperties": False}
+STATUS_OUTPUT = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string"},
+        "support_state": {"type": "string"},
+        "observed_at": {"type": "string"},
+    },
+    "required": ["status", "support_state", "observed_at"],
+    "additionalProperties": False,
+}
+HISTORY_OUTPUT = {
+    "type": "object",
+    "properties": {
+        "messages": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "content": {"type": "string", "maxLength": 400},
+                },
+                "required": ["id", "content"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["messages"],
+    "additionalProperties": False,
+}
+
+SLA_OUTPUT = {
+    "type": "object",
+    "properties": {
+        "state": {"type": "string"},
+        "first_response_due_at": {"type": "string"},
+        "observed_at": {"type": "string"},
+    },
+    "required": ["state", "first_response_due_at", "observed_at"],
+    "additionalProperties": False,
+}
+SEARCH_PARAMETERS = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string", "minLength": 2, "maxLength": 200},
+    },
+    "required": ["query"],
+    "additionalProperties": False,
+}
+SEARCH_OUTPUT = {
+    "type": "object",
+    "properties": {
+        "hits": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "chunk_id": {"type": "string"},
+                    "excerpt": {"type": "string", "maxLength": 500},
+                },
+                "required": ["chunk_id", "excerpt"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["hits"],
+    "additionalProperties": False,
+}
+
+
+def conversation_snapshot(arguments: dict, context: ExecutionContext) -> dict:
+    return arguments["_snapshot"]
+
+
 @dataclass(frozen=True)
 class Capability:
     key: str
@@ -43,8 +120,11 @@ class Capability:
     handler: Callable
     read_only: bool = True
     timeout_seconds: float = 2
+    risk: int = 1
 
     def __post_init__(self):
+        if self.risk not in range(5) or (not self.read_only and self.risk < 2):
+            raise ValueError("Invalid deployment capability risk")
         check_schema(self.parameters)
         check_schema(self.output_schema)
         if not 0 < self.timeout_seconds <= 5 or "<locals>" in self.handler.__qualname__:
@@ -63,7 +143,24 @@ class ToolRegistry:
 
 
 def default_registry():
-    return ToolRegistry([Capability("text_metrics", 1, TEXT_PARAMETERS, TEXT_OUTPUT, text_metrics)])
+    from support_agent.desk_capabilities import capabilities
+
+    return ToolRegistry(
+        [
+            *capabilities(),
+            Capability("text_metrics", 1, TEXT_PARAMETERS, TEXT_OUTPUT, text_metrics, risk=0),
+            Capability(
+                "conversation_status", 1, EMPTY_PARAMETERS, STATUS_OUTPUT, conversation_snapshot
+            ),
+            Capability(
+                "conversation_history", 1, EMPTY_PARAMETERS, HISTORY_OUTPUT, conversation_snapshot
+            ),
+            Capability("conversation_sla", 1, EMPTY_PARAMETERS, SLA_OUTPUT, conversation_snapshot),
+            Capability(
+                "knowledge_search", 1, SEARCH_PARAMETERS, SEARCH_OUTPUT, conversation_snapshot
+            ),
+        ]
+    )
 
 
 class ToolFailure(Exception):

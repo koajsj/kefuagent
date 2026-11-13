@@ -1,3 +1,4 @@
+import { CustomerContext } from "./CustomerContext";
 import { Button } from "@heroui/react";
 import { useEffect, useState, useRef } from "react";
 import { useApp } from "../../app/context";
@@ -135,6 +136,7 @@ export function Operations({
   }
   return (
     <div className="operations">
+      <CustomerContext conversation={c} refresh={refresh} disabled={stale} />
       {stale && (
         <p className="warning">
           会话已更新，草稿已保留。重新打开会话后可保存运营信息。

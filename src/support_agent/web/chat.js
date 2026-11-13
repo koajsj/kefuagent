@@ -33,6 +33,7 @@ export async function chatPage(ctx) {
     offset = 0,
     historyOffset = 0,
     busy = false,
+    creating = false,
     openEpoch = 0;
   let operators = null;
   let stopPolling = () => {};
@@ -66,18 +67,48 @@ export async function chatPage(ctx) {
     }
   }
   async function createConversation() {
+    if (creating) return;
     const subject = prompt("会话标题", "新会话");
     if (!subject?.trim()) return;
+    creating = true;
+    let persisted = true;
+    let acknowledged = false;
     try {
+      const payload = { subject: subject.trim(), channel: "web" };
+      const identity = await requestIdentity(payload);
+      if (!ctx.isCurrent()) return;
+      const keyName = `support.pending.conversation-create.api.${ctx.tenant}.${ctx.user.id}.${identity.digest}`;
+      const requestKey = sessionState.get(keyName) || identity.key;
+      persisted = sessionState.set(keyName, requestKey);
       const created = await ctx.api("/conversations", {
         method: "POST",
-        body: { subject: subject.trim(), channel: "web" },
+        body: { ...payload, idempotency_key: requestKey },
       });
+      if (!ctx.isCurrent()) return;
+      if (
+        !created || typeof created.id !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(created.id) ||
+        created.tenant_id !== ctx.tenant || created.created_by !== ctx.user.id
+      )
+        throw new Error("会话创建响应不完整或归属不符，结果仍未知。已保留原请求标识，请核对列表或使用相同标题重试。");
+      acknowledged = true;
+      sessionState.remove(keyName);
+      ctx.notify("会话已就绪。后续加载失败时，请从列表重新打开，无需再次创建。");
       offset = 0;
-      await loadList();
+      await loadList().catch(() => {
+        if (ctx.isCurrent()) ctx.notify("会话已创建，但列表刷新失败，正在尝试打开会话。无需再次创建。");
+      });
+      if (!ctx.isCurrent()) return;
       await open(created);
     } catch (error) {
-      showError(error);
+      if (acknowledged) {
+        if (ctx.isCurrent() && !["StaleResponse", "AbortError"].includes(error.name)) ctx.notify("会话已创建，后续加载失败。请刷新列表后打开，无需再次创建。 " + error.message);
+      } else {
+        showError(error);
+        if (!persisted && ctx.isCurrent()) ctx.notify("浏览器无法持久保存请求标识；请勿刷新，先核对会话列表。");
+      }
+    } finally {
+      creating = false;
     }
   }
   async function loadList() {
@@ -315,13 +346,20 @@ export async function chatPage(ctx) {
       inline.replaceChildren();
       runState.textContent = "正在提交…";
       const submittedContent = content.value;
-      const keyName = "support.pending." + ctx.tenant + "." + cid;
+      const keyName = "support.pending." + ctx.tenant + "." + ctx.user.id + "." + cid;
       try {
         if (human) {
+          const payload = { role: "assistant", content: submittedContent };
+          let previous;
+          try { previous = JSON.parse(sessionState.get(keyName)); } catch { previous = null; }
+          const identity = await requestIdentity(payload, previous);
+          if (!ctx.isCurrent() || selected?.id !== cid) return;
+          sessionState.set(keyName, JSON.stringify(identity));
           await ctx.api(`/conversations/${cid}/messages`, {
             method: "POST",
-            body: { role: "assistant", content: content.value },
+            body: { ...payload, idempotency_key: identity.key },
           });
+          sessionState.remove(keyName);
         } else {
           const payload = {
             agent_config_id: agent.value,

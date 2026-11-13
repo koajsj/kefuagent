@@ -1,6 +1,6 @@
 # 本机快速开始
 
-适用于全新、独立的 macOS 开发环境，需要 Python 3.11–3.14、PostgreSQL 15+、Node 22.12+（构建前端）和 [uv](https://docs.astral.sh/uv/)；本机脚本默认使用 Homebrew PostgreSQL 17。Linux、已有数据库和生产环境请先阅读[部署与恢复](DEPLOYMENT.md)。
+适用于全新、独立的 macOS 开发环境，需要 Python 3.11–3.14、PostgreSQL 15+、Node 22.12+（构建前端）和 [uv](https://docs.astral.sh/uv/)；本机脚本默认使用 Homebrew PostgreSQL 17。0018 起还必须安装并在目标库启用 pgvector，推荐配置及管理员操作边界见[扩展与隔离 Compose](DEPLOYMENT.md#pgvector-与隔离-compose)。初始化脚本不会安装或启用扩展，缺少扩展时不能执行完整迁移。Linux、已有数据库和生产环境请先阅读[部署与恢复](DEPLOYMENT.md)。
 
 ```bash
 git clone https://github.com/koajsj/kefuagent.git

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Query, Request
 
 from support_agent.dependencies import Database, TenantAdmin, TenantContext
 from support_agent.models import AgentConfig
-from support_agent.schemas import AgentCreate, AgentOut, AgentUpdate
+from support_agent.schemas import AgentChangeOut, AgentCreate, AgentOut, AgentUpdate
 from support_agent.services import agents
 from support_agent.services.resources import get_owned
 
@@ -30,6 +30,17 @@ def list_configs(
 @router.get("/{config_id}", response_model=AgentOut)
 def detail(config_id: UUID, db: Database, context: TenantContext):
     return get_owned(db, AgentConfig, context, config_id)
+
+
+@router.get("/{config_id}/changes", response_model=list[AgentChangeOut])
+def changes(
+    config_id: UUID,
+    db: Database,
+    context: TenantAdmin,
+    limit: int = Query(30, ge=1, le=100),
+    offset: int = Query(0, ge=0, le=10000),
+):
+    return agents.changes(db, context, config_id, limit, offset)
 
 
 @router.put("/{config_id}", response_model=AgentOut)

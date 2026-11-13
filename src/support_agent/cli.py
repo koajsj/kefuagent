@@ -118,7 +118,7 @@ def maintenance(args, parser):
     from support_agent.errors import AppError
     from support_agent.maintenance import audit, rotate_credentials, rotation_plan
     from support_agent.retention import apply_retention, retention_plan
-    from support_agent.storage import LocalDocumentStorage
+    from support_agent.storage import document_storage
 
     settings = Settings()
     engine, sessions = build_database(settings)
@@ -157,7 +157,7 @@ def maintenance(args, parser):
                             args.tenant,
                             policy,
                             args.confirm,
-                            LocalDocumentStorage(settings.document_storage_root),
+                            document_storage(settings),
                         )
                     )
             except (AppError, SQLAlchemyError, ValueError, RuntimeError, OSError):

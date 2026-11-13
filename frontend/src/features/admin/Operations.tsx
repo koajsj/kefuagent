@@ -17,10 +17,10 @@ import { useResource } from "../../hooks/useResource";
 import { collection } from "../../adapters/collection";
 import type { Row } from "../../types";
 
-export function Operations({ page }: { page: string }) {
+export function Operations({ page, initialKind = "calls" }: { page: string; initialKind?: string }) {
   const { api, tenant, notify, refreshSession, user } = useApp();
   const [offset, setOffset] = useState(0),
-    [kind, setKind] = useState("calls"),
+    [kind, setKind] = useState(initialKind),
     [detail, setDetail] = useState<Row | null>(null),
     [editing, setEditing] = useState<Row | null>(null),
     [busy, setBusy] = useState(false);
@@ -107,7 +107,7 @@ export function Operations({ page }: { page: string }) {
     members: "企业成员",
     credentials: "模型凭证",
     activity: "用量与审计",
-    platform: "平台管理",
+    platform: "实例账户",
   };
   if (resource.loading || resource.error)
     return (
@@ -448,7 +448,7 @@ export function Operations({ page }: { page: string }) {
               </Button>
             </form>
           </Panel>
-          <Panel title="创建企业">
+          {!extra.loading && !extra.error && extra.data?.length === 0 && <Panel title="初始化本实例企业">
             <form onSubmit={submit("/tenants")}>
               <Field label="企业名称">
                 <input name="name" required />
@@ -476,8 +476,8 @@ export function Operations({ page }: { page: string }) {
                 创建企业
               </Button>
             </form>
-          </Panel>
-          <Panel title="企业">
+          </Panel>}
+          <Panel title="本实例企业">
             <DataTable
               columns={["名称", "标识", "状态", "操作"]}
               rows={(extra.data || []).map((t: Row) => [

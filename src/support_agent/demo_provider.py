@@ -3,12 +3,15 @@
 import hashlib
 import json
 
+from support_agent.prompting import CONNECTION_PROMPT
 from support_agent.providers import Completion, ModelToolCall
 
 
 class DemoProvider:
     def complete(self, *, messages, tools=None, **kwargs):
         user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+        if user == CONNECTION_PROMPT:
+            return Completion('{"ok":true}', 0, 0, 0)
         try:
             payload = json.loads(user)
         except (ValueError, TypeError):

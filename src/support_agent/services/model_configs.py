@@ -1,6 +1,7 @@
 from sqlalchemy import select, text
 
 from support_agent.credentials import Keyring
+from support_agent.dependencies import locked_staff_context
 from support_agent.errors import AppError
 from support_agent.models import ModelCredential
 from support_agent.providers import validate_base_url
@@ -17,6 +18,7 @@ def credential_lock(db, tenant_id):
 
 
 def create_credential(db, context, data, request):
+    context = locked_staff_context(db, context, request, admin=True)
     credential_lock(db, context.tenant_id)
     encrypted = Keyring(request.app.state.settings).seal(
         context.tenant_id, data.ref, data.api_key.get_secret_value()
@@ -35,6 +37,7 @@ def create_credential(db, context, data, request):
 
 
 def update_credential(db, context, credential_id, data, request):
+    context = locked_staff_context(db, context, request, admin=True)
     credential_lock(db, context.tenant_id)
     row = get_owned(db, ModelCredential, context, credential_id, lock=True)
     if row.ref != data.ref:
@@ -51,6 +54,7 @@ def update_credential(db, context, credential_id, data, request):
 
 
 def delete_credential(db, context, credential_id, request):
+    context = locked_staff_context(db, context, request, admin=True)
     credential_lock(db, context.tenant_id)
     row = get_owned(db, ModelCredential, context, credential_id, lock=True)
     db.delete(row)

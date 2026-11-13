@@ -114,7 +114,11 @@ class IngressMiddleware:
             if path in {"/api/v1/auth/login", "/api/v1/web-session"} and scope["method"] == "POST"
             else "upload"
             if scope["method"] == "POST"
-            and (path.endswith("/documents") or path.endswith("/reprocess"))
+            and (
+                path.endswith("/documents")
+                or path.endswith("/reprocess")
+                or path.endswith("/attachments")
+            )
             else "public"
             if path.startswith("/api/v1/public/")
             else "all"

@@ -1,6 +1,12 @@
 # 架构与阶段实施记录
 
+当前质量机制为 [Static Verification First](../AGENTS.md)：检查源码、类型、API 契约和离线迁移声明，不启动服务或数据库；下方阶段计划与验收为历史记录，不作为当前执行指令。
+
 本文保留各阶段的历史计划和验收记录；其中 0.4.0 等版本及阶段范围仅描述当时状态。当前版本以 `pyproject.toml` 为准。当前系统是 FastAPI、PostgreSQL 模块化单体，管理工作台和访客聊天现已迁移至 React 19 / TypeScript / HeroUI v3，支持正式 API 与构建时隔离的静态 Demo；旧 ES Modules 保留作迁移回退。前端结构与交付见 [React 前端说明](FRONTEND.md)。当前能力和验收边界以 README 及对应文档为准。
+
+当前单企业私有化增量使用静态能力注册表、服务端有限快照与经授权的 R2 固定服务命令；成员已读游标与个人记忆分别按 tenant + user FORCE RLS 隔离。0012 只在新隔离库验证，实际业务闭环、CI 与未验收边界见[产品质量专项](PRODUCT_QUALITY_ACCEPTANCE.md)。最新模块、数据模型、API 与未实现项见[产品化矩阵](PRODUCTIZATION.md)。以下仍是历史阶段记录。
+
+当前专项 B 增量：`search` 组合现有词法检索与 PostgreSQL pgvector，`vector_index` 管理模型空间/增量队列；`customer_exports` 与 `drafts` 使用现有 Worker、鉴权、模型网关和私有存储。ModelCall 承载 Embedding/search/draft，金额账本逐次预留；四张新表由0018追加，RLS与A的审批/Widget不变。完整数据图、边界与静态证据见[专项B审查](DEEP_AUDIT_REPORT.md#专项-b核心产品能力2026-11-10)。
 
 ## P4 离线实施计划（用户选择暂不真实调用）
 

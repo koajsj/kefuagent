@@ -5,6 +5,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from support_agent.db import authorization_gate
 from support_agent.errors import AppError
 from support_agent.models import AuthSession, Membership, Tenant, User
 from support_agent.security import hash_password, token_digest, verify_password
@@ -63,6 +64,7 @@ def create_user(db: Session, data, request):
 
 
 def set_user_status(db: Session, user_id: UUID, status: str, request):
+    authorization_gate(db, user_id=user_id, exclusive=True)
     # Lock in stable order: user, then all involved tenant rows. Membership changes lock
     # target users before tenants too, preventing last-admin checks racing user deactivation.
     user = db.scalar(select(User).where(User.id == user_id).with_for_update())
@@ -115,6 +117,8 @@ def set_user_status(db: Session, user_id: UUID, status: str, request):
 
 def logout(db: Session, session_id: UUID, request):
     session = db.get(AuthSession, session_id)
+    authorization_gate(db, user_id=session.user_id, exclusive=True)
+    db.refresh(session)
     session.revoked_at = datetime.now(UTC)
     record(db, request, "auth.logout", "session")
 

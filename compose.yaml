@@ -16,6 +16,7 @@ services:
       retries: 6
     restart: unless-stopped
   app:
+    image: kefuagent:local
     build: .
     env_file: .env.compose
     environment:
@@ -35,6 +36,21 @@ services:
       start_period: 15s
     # Allow in-flight requests to drain before the runtime sends SIGKILL.
     stop_grace_period: 180s
+    restart: unless-stopped
+  worker:
+    image: kefuagent:local
+    build: .
+    profiles: ["worker"]
+    command: ["python", "-m", "support_agent.worker", "--interval", "30"]
+    env_file: .env.compose
+    environment:
+      DOCUMENT_STORAGE_ROOT: /data/documents
+    volumes:
+      - document_data:/data/documents
+    depends_on:
+      db:
+        condition: service_healthy
+    stop_grace_period: 30s
     restart: unless-stopped
 secrets:
   postgres_password:

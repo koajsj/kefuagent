@@ -1,6 +1,7 @@
 import re
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
+from sqlalchemy.orm import aliased
 
 from support_agent.errors import AppError
 from support_agent.models import Document, DocumentChunk, KnowledgeBase
@@ -13,6 +14,7 @@ from support_agent.search_text import (
     query_groups,
 )
 from support_agent.services.knowledge import active_base
+from support_agent.services.memory import sensitive
 
 _INJECTION = re.compile(
     r"(?:ignore|disregard|override|forget).{0,80}(?:previous|system|developer|instruction)|"
@@ -24,18 +26,34 @@ _INJECTION = re.compile(
 )
 
 
-def reference_is_safe(content):
-    # Conservative known-pattern screen, not a general prompt-injection classifier.
-    return not _INJECTION.search(content)
+def reference_is_safe(content, *, document_name="", section=None):
+    # Shared by retrieval and historical delivery; known credentials must not
+    # reach a model or visitor through an otherwise authorized knowledge source.
+    # These conservative patterns are not general DLP or injection detection.
+    return all(
+        not sensitive(value) and not _INJECTION.search(value)
+        for value in (content, document_name, section or "")
+    )
 
 
 class PostgresFTSRetriever:
-    def search(self, db, context, knowledge_base_ids, query, limit=6):
+    def search(
+        self, db, context, knowledge_base_ids, query, limit=6, *, document_ids=None, section=None
+    ):
         for kid in knowledge_base_ids:
             active_base(db, context, kid)
-        if HAN.fullmatch(query.strip()):
-            return self._single_han(db, context, knowledge_base_ids, query.strip(), limit)
         groups = query_groups(query)
+        single_han = [group[0] for group in groups if len(group) == 1 and HAN.fullmatch(group[0])]
+        if groups and len(groups) == len(single_han):
+            return self._bounded_han(
+                db,
+                context,
+                knowledge_base_ids,
+                single_han,
+                limit,
+                document_ids=document_ids,
+                section=section,
+            )
         lanes = [
             (DocumentChunk.chinese_vector, query_expression(groups)),
             (DocumentChunk.search_vector, latin_expression(groups)),
@@ -67,8 +85,13 @@ class PostgresFTSRetriever:
                     KnowledgeBase.tenant_id == context.tenant_id,
                     Document.knowledge_base_id.in_(knowledge_base_ids),
                     Document.status == "ready",
+                    Document.is_published.is_(True),
                     KnowledgeBase.status == "active",
                     DocumentChunk.generation == Document.generation,
+                    DocumentChunk.is_current.is_(True),
+                    DocumentChunk.is_deleted.is_(False),
+                    Document.id.in_(document_ids) if document_ids else True,
+                    DocumentChunk.section == section if section else True,
                     vector.op("@@")(tsquery),
                     score >= 0.001,
                 )
@@ -76,11 +99,13 @@ class PostgresFTSRetriever:
                 .limit(60)
             ).all()
             for rank, (chunk, name, _) in enumerate(rows, 1):
-                if not reference_is_safe(chunk.content):
+                if not reference_is_safe(chunk.content, document_name=name, section=chunk.section):
                     continue
                 if chunk.id not in body_coverage:
                     body_coverage[chunk.id] = coverage(chunk.content, groups)
-                if body_coverage[chunk.id] < 0.4:
+                if body_coverage[chunk.id] < 0.4 or any(
+                    character not in chunk.content for character in single_han
+                ):
                     continue
                 candidates[chunk.id] = (chunk, name)
                 fused[chunk.id] = fused.get(chunk.id, 0) + 1 / (60 + rank)
@@ -117,9 +142,11 @@ class PostgresFTSRetriever:
             for cid in ordered
         ]
 
-    def _single_han(self, db, context, knowledge_base_ids, character, limit):
+    def _bounded_han(
+        self, db, context, knowledge_base_ids, characters, limit, *, document_ids=None, section=None
+    ):
         if not 1 <= limit <= 10:
-            raise AppError(422, "unsupported_query", "Single-character search limit must be 1–10")
+            raise AppError(422, "unsupported_query", "Bounded Han search limit must be 1–10")
         scope = (
             select(DocumentChunk.id)
             .join(
@@ -138,8 +165,13 @@ class PostgresFTSRetriever:
                 KnowledgeBase.tenant_id == context.tenant_id,
                 Document.knowledge_base_id.in_(knowledge_base_ids),
                 Document.status == "ready",
+                Document.is_published.is_(True),
                 KnowledgeBase.status == "active",
                 DocumentChunk.generation == Document.generation,
+                DocumentChunk.is_current.is_(True),
+                DocumentChunk.is_deleted.is_(False),
+                Document.id.in_(document_ids) if document_ids else True,
+                DocumentChunk.section == section if section else True,
             )
             .limit(1001)
         )
@@ -149,7 +181,7 @@ class PostgresFTSRetriever:
             ids = list(db.scalars(scope))
             if len(ids) > 1000:
                 raise AppError(
-                    422, "query_too_broad", "Single-character search scope exceeds 1000 chunks"
+                    422, "query_too_broad", "Bounded Han search scope exceeds 1000 chunks"
                 )
             rows = db.execute(
                 select(DocumentChunk, Document.filename)
@@ -169,17 +201,22 @@ class PostgresFTSRetriever:
                     KnowledgeBase.tenant_id == context.tenant_id,
                     Document.knowledge_base_id.in_(knowledge_base_ids),
                     Document.status == "ready",
+                    Document.is_published.is_(True),
                     KnowledgeBase.status == "active",
                     DocumentChunk.generation == Document.generation,
+                    DocumentChunk.is_current.is_(True),
+                    DocumentChunk.is_deleted.is_(False),
+                    Document.id.in_(document_ids) if document_ids else True,
+                    DocumentChunk.section == section if section else True,
                     DocumentChunk.id.in_(ids),
-                    DocumentChunk.content.like(f"%{character}%"),
+                    *(DocumentChunk.content.like(f"%{character}%") for character in characters),
                 )
                 .order_by(DocumentChunk.document_id, DocumentChunk.position)
                 .limit(61)
             ).all()
             if len(rows) > 60:
                 raise AppError(
-                    422, "query_too_broad", "Single-character search matches more than 60 chunks"
+                    422, "query_too_broad", "Bounded Han search matches more than 60 chunks"
                 )
             db.execute(select(func.set_config("statement_timeout", previous_timeout, True)))
         return [
@@ -195,14 +232,19 @@ class PostgresFTSRetriever:
                 strategy="postgres_han_bounded",
             )
             for rank, (chunk, name) in enumerate(
-                ((chunk, name) for chunk, name in rows if reference_is_safe(chunk.content)), 1
+                (
+                    (chunk, name)
+                    for chunk, name in rows
+                    if reference_is_safe(chunk.content, document_name=name, section=chunk.section)
+                ),
+                1,
             )
             if rank <= limit
         ]
 
-    def current_chunks(self, db, context, chunk_ids, *, lock=False):
-        if lock and context.public_session_id is not None:
-            # Follow deletion's KB -> document order; protect publication history delivery.
+    def current_chunks(self, db, context, chunk_ids, *, lock=False, current_only=False):
+        if lock:
+            # Lock before evaluating lineage, using deletion's KB -> document order.
             bases = (
                 select(Document.knowledge_base_id)
                 .join(DocumentChunk, DocumentChunk.document_id == Document.id)
@@ -218,6 +260,32 @@ class PostgresFTSRetriever:
                 .order_by(KnowledgeBase.id)
                 .with_for_update(read=True)
             ).all()
+            db.scalars(
+                select(Document)
+                .where(
+                    Document.tenant_id == context.tenant_id,
+                    Document.id.in_(
+                        select(DocumentChunk.document_id).where(
+                            DocumentChunk.tenant_id == context.tenant_id,
+                            DocumentChunk.id.in_(chunk_ids),
+                        )
+                    ),
+                )
+                .order_by(Document.id)
+                .with_for_update(read=True)
+                .execution_options(populate_existing=True)
+            ).all()
+        current = aliased(DocumentChunk)
+        valid_lineage = exists(
+            select(current.id).where(
+                current.tenant_id == DocumentChunk.tenant_id,
+                current.document_id == DocumentChunk.document_id,
+                current.generation == DocumentChunk.generation,
+                current.root_chunk_id == DocumentChunk.root_chunk_id,
+                current.is_current.is_(True),
+                current.is_deleted.is_(False),
+            )
+        )
         stmt = (
             select(DocumentChunk, Document)
             .join(
@@ -236,10 +304,17 @@ class PostgresFTSRetriever:
                 Document.tenant_id == context.tenant_id,
                 KnowledgeBase.tenant_id == context.tenant_id,
                 Document.status == "ready",
+                Document.is_published.is_(True),
                 KnowledgeBase.status == "active",
                 DocumentChunk.generation == Document.generation,
+                DocumentChunk.is_deleted.is_(False),
+                valid_lineage,
             )
         )
-        if lock:
-            stmt = stmt.with_for_update(read=True, of=Document)
-        return {chunk.id: (chunk, doc) for chunk, doc in db.execute(stmt)}
+        if current_only:
+            stmt = stmt.where(DocumentChunk.is_current.is_(True))
+        return {
+            chunk.id: (chunk, doc)
+            for chunk, doc in db.execute(stmt)
+            if reference_is_safe(chunk.content, document_name=doc.filename, section=chunk.section)
+        }

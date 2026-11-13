@@ -65,6 +65,11 @@ class FeedbackOut(Output):
     created_at: datetime
 
 
+class StaffFeedbackOut(FeedbackOut):
+    id: UUID
+    conversation_id: UUID
+
+
 class ConversationMetrics(Output):
     total: int
     pending: int
@@ -100,7 +105,11 @@ class UsageMetrics(Output):
     input_tokens: int = Field(description="Known input tokens only")
     output_tokens: int = Field(description="Known output tokens only")
     unknown_usage_calls: int
-    known_cost: None = Field(description="No verified prices configured; unknown, not zero")
+    known_cost: None = Field(
+        description="Legacy scalar unavailable; use currency-specific known_cost_subtotals"
+    )
+    known_cost_subtotals: dict[str, str] = Field(default_factory=dict)
+    cost_complete: bool = False
     unknown_cost_calls: int
     models: list[ModelMetrics]
 
@@ -143,3 +152,11 @@ class AnalyticsOut(Output):
     feedback: FeedbackMetrics
     categories: list[CategoryMetrics]
     unresolved: list[UnresolvedConversation]
+
+
+class ReadCursorInput(Input):
+    message_id: UUID
+
+
+class ReadCursorOut(Output):
+    message_id: UUID

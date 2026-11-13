@@ -65,9 +65,9 @@ uv run python -m support_agent.cli retention execute --tenant TENANT_UUID --conv
 ```
 
 - 每类最多选择 1–100 个根记录，预览包含本批消息/执行/调用/访客/分块关联数量；总影响超过 10000 行拒绝执行，不能用“大批处理”绕过事务边界。
-- 仅选择已关闭且最后活动已过期的内部会话；访客过期并闲置超过期限可删除完整会话。任何 running 调用（含待核实中断）均保护；消息或调用仍在保留/配额窗口内也保护。
-- 会话与消息、工具记录、模型调用、访客记录按外键顺序同事务删除；旧会话 ID 以后 404，不允许重放触发新调用。独立连接测试仅压缩步骤细节，保留最小身份/幂等/结果/用量摘要；不把删计费凭据当隐私方案。
-- 已 ready 的知识文档不按年龄自动删除。`--documents` 仅续做已有 deleting 文档：先前已不可检索，文件不存在可重试；本地文件和 DB 无跨介质事务，失败保留 tombstone，重新预览可恢复清理。引用历史和备份有自己的生命周期。
+- 仅选择已关闭且最后活动已过期的内部会话；访客过期并闲置仅纳入预览；用户级记忆/游标 FORCE RLS 无法完整计数，会话执行保持 BLOCKED。任何 running 调用（含待核实中断）均保护；消息或调用仍在保留/配额窗口内也保护。
+- 当前不执行会话/消息/工具/访客级联删除，不把不可见依赖当作零。独立连接测试仅压缩步骤细节，保留最小身份/幂等/结果/用量摘要；不把删计费凭据当隐私方案。
+- 已 ready 的知识文档不按年龄自动删除。`--documents` 仅预览已有 deleting 文档；历史 JSON 引用范围未完整绑定确认，执行 BLOCKED，不 unlink、不删历史分块。既有 tombstone 保留供后续独立审查；本地文件和 DB 无跨介质原子性。引用历史和备份有自己的生命周期。
 - 每批成功审计与数据库修改同事务，重复提交同摘要返回 already_applied；集合变化要求重新预览。失败时检查状态与审计后重试，不运行无限循环；默认不安装 cron。
 
 这是业务保留与删除工具，**不是完整隐私擦除**。全局用户身份、审计、保留摘要、备份、远端模型留存及导出副本需分别治理；旧备份恢复后还需重放撤销/删除。尚无自动合规判断或全链路擦除证明。
@@ -76,4 +76,4 @@ uv run python -m support_agent.cli retention execute --tenant TENANT_UUID --conv
 
 `.github/workflows/ci.yml` 在 main push、PR 或手动触发。CI 使用全新短暂 PostgreSQL 17 数据库、非超级/非 BYPASSRLS 应用角色，并显式执行 0001–0010 迁移；不配置 `TEST_DATABASE_URL`。随后运行静态检查和该数据库的 Alembic schema 差异检查。没有个人路径、真实 Key 或外部模型。
 
-`uv run python scripts/check.py` 检查 Ruff、格式、Python AST 和迁移链等静态结构；仅在全新隔离 CI 数据库显式设置 `DATABASE_URL` 后加 `--database` 检查数据库 schema，检查本身不会迁移。先用 `uv build --wheel --out-dir .local/dist` 构建 wheel，再用 `uv run python scripts/check_delivery.py --wheel .local/dist/具体文件.whl` 检查 Node 语法、模块、DOM、资源、wheel MIT 许可证及 Markdown/敏感内容。两者均不运行 Python 或 JavaScript 测试；静态检查不能证明运行时行为。历史 Actions 与阶段结果见各验收记录，不能视为当前远端 CI 通过。
+`uv run python scripts/check.py` 仅检查 Ruff、格式、Python AST、迁移链和离线 SQL/RLS 声明；数据库检查选项已移除。`npm run check --prefix frontend` 检查 TypeScript；`uv run python scripts/check_delivery.py` 检查源码模块、HTML、Markdown 链接和敏感文件，无需构建或服务。可经授权用 `--wheel PATH` 检查已有包，但不会自动构建。当前长期规则见 [AGENTS.md](../AGENTS.md)，历史阶段结果不能视为当前运行时或 CI 通过。

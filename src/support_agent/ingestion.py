@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import zipfile
+from html.parser import HTMLParser
 from pathlib import PurePath
 from threading import BoundedSemaphore, Event, Thread
 
@@ -24,6 +25,7 @@ MIMES = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".txt": "text/plain",
     ".md": "text/markdown",
+    ".html": "text/html",
 }
 
 
@@ -59,7 +61,7 @@ def validate_upload(filename, content):
             raise AppError(
                 422, "invalid_document", "Invalid DOCX package or resource limits exceeded"
             ) from None
-    if suffix in (".txt", ".md"):
+    if suffix in (".txt", ".md", ".html"):
         try:
             value = content.decode("utf-8-sig")
             if "\x00" in value or any(ord(c) < 32 and c not in "\n\r\t" for c in value):
@@ -76,21 +78,121 @@ def chunk_sections(sections):
     grouped = []
     for text, page, section in sections:
         if grouped and grouped[-1][1:] == (page, section):
-            previous = grouped[-1][0]
-            grouped[-1] = (previous + "\n\n" + text, page, section)
+            grouped[-1][0].append(text)
         else:
-            grouped.append((text, page, section))
-    for text, page, section in grouped:
+            grouped.append(([text], page, section))
+    for parts, page, section in grouped:
+        text = "\n\n".join(parts)
         text = text.replace("\r\n", "\n").replace("\x00", "").strip()
-        for start in range(0, len(text), 1000):
-            item = text[start : start + 1200].strip()
+        start = 0
+        while start < len(text):
+            end = min(start + 1200, len(text))
+            if end < len(text):
+                # Prefer whole paragraphs, then table/list lines, then sentences.
+                # Keep original text and page/section lineage; no invented headers.
+                window = text[start + 900 : end]
+                for pattern in (r"\n[ \t]*\n", r"\n", r"[。！？]|[.!?](?=\s)"):
+                    boundaries = list(re.finditer(pattern, window))
+                    if boundaries:
+                        end = start + 900 + boundaries[-1].end()
+                        break
+            item = text[start:end].strip()
             if item:
                 chunks.append({"content": item, "page": page, "section": section})
-            if start + 1200 >= len(text):
+            if end == len(text):
                 break
+            # Retain up to 200 original characters across the boundary, starting
+            # at a complete line when possible. Long unbroken text stays bounded.
+            overlap = max(start + 1, end - 200)
+            newline = text.find("\n", overlap, end - 1)
+            start = newline + 1 if newline >= 0 else overlap
     if not chunks or len(chunks) > 750:
         raise ValueError("empty_or_large")
     return chunks
+
+
+class _HTMLText(HTMLParser):
+    """Text extraction only: never load links or render uploaded markup."""
+
+    ignored = {"script", "style", "template", "noscript", "svg", "iframe", "object", "head"}
+    breaks = {
+        "p",
+        "div",
+        "br",
+        "li",
+        "tr",
+        "section",
+        "article",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+    }
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []
+        self.parts = []
+        self.size = 0
+
+    def handle_starttag(self, tag, attrs):
+        hidden = tag in self.ignored or any(
+            name == "hidden"
+            or (name == "aria-hidden" and (value or "").lower() == "true")
+            or (
+                name == "style"
+                and re.search(
+                    r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse))\s*(?:!important\s*)?(?:;|$)",
+                    value or "",
+                    re.IGNORECASE,
+                )
+            )
+            for name, value in attrs
+        )
+        if tag not in {
+            "br",
+            "hr",
+            "img",
+            "input",
+            "meta",
+            "link",
+            "source",
+            "wbr",
+            "area",
+            "base",
+            "embed",
+            "param",
+            "track",
+            "col",
+        }:
+            self.stack.append((tag, hidden or (self.stack[-1][1] if self.stack else False)))
+            if len(self.stack) > 256:
+                raise ValueError("html_depth")
+        if not any(item[1] for item in self.stack):
+            if tag in self.breaks:
+                self.parts.append("\n")
+            elif tag in {"td", "th"}:
+                # Keep adjacent table cells distinct instead of merging values.
+                self.parts.append(" | ")
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                hidden = self.stack[index][1]
+                del self.stack[index:]
+                if tag in self.breaks and not hidden:
+                    self.parts.append("\n")
+                break
+
+    def handle_data(self, data):
+        if any(item[1] for item in self.stack):
+            return
+        self.size += len(data)
+        if self.size > MAX_TEXT_CHARS:
+            raise ValueError("text_limits")
+        self.parts.append(data)
 
 
 def parse_file(content, suffix):
@@ -131,6 +233,11 @@ def parse_file(content, suffix):
             if total > MAX_TEXT_CHARS:
                 raise ValueError("text_limits")
             sections.append((body, None, heading))
+    elif suffix == ".html":
+        parser = _HTMLText()
+        parser.feed(content.decode("utf-8-sig"))
+        parser.close()
+        sections.append(("".join(parser.parts), None, None))
     else:
         body = content.decode("utf-8-sig")
         if len(body) > MAX_TEXT_CHARS:

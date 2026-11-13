@@ -1,8 +1,11 @@
 from datetime import UTC, datetime
+from uuid import uuid5
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import func, select, text, tuple_
 
+from support_agent.dependencies import locked_staff_context, resume_context
 from support_agent.errors import AppError, forbidden
+from support_agent.maintenance import confirmation
 from support_agent.models import Conversation, Message
 from support_agent.services import operations
 from support_agent.services.audit import record
@@ -11,8 +14,44 @@ from support_agent.services.resources import get_owned
 
 
 def create(db, context, data, request):
+    context = locked_staff_context(db, context, request)
+    # Authorization gates precede command locks, held through creation and audit commit.
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {
+            "key": f"conversation-create:{context.tenant_id}:{context.user_id}:{data.idempotency_key}"
+        },
+    )
+    # Authorization gates block revocation, but cannot stop a Session expiring while we wait.
+    context = resume_context(db, context, request)
+    fields = data.model_dump(exclude={"idempotency_key"})
+    digest = confirmation({"version": 1, **fields})
+    existing = db.scalar(
+        select(Conversation).where(
+            Conversation.tenant_id == context.tenant_id,
+            Conversation.created_by == context.user_id,
+            Conversation.idempotency_key == data.idempotency_key,
+        )
+    )
+    if existing is not None:
+        if existing.input_digest != digest:
+            raise AppError(409, "idempotency_conflict", "Conversation key has different input")
+        # Return current state; never restore creation-time status, title or assignment.
+        record(
+            db,
+            request,
+            "conversation.create_replay",
+            "conversation",
+            existing.id,
+            tenant_id=context.tenant_id,
+        )
+        return existing
     conversation = Conversation(
-        **data.model_dump(), tenant_id=context.tenant_id, created_by=context.user_id
+        **fields,
+        tenant_id=context.tenant_id,
+        created_by=context.user_id,
+        idempotency_key=data.idempotency_key,
+        input_digest=digest,
     )
     db.add(conversation)
     db.flush()
@@ -28,6 +67,7 @@ def create(db, context, data, request):
 
 
 def set_status(db, context, resource_id, data, request):
+    context = locked_staff_context(db, context, request, admin=True)
     conversation = get_owned(db, Conversation, context, resource_id, lock=True)
     if context.role != "admin":
         raise forbidden()
@@ -57,7 +97,23 @@ def set_status(db, context, resource_id, data, request):
 
 
 def append_message(db, context, conversation_id, data, request):
+    context = locked_staff_context(db, context, request)
     conversation = get_owned(db, Conversation, context, conversation_id, lock=True)
+    message_id = uuid5(conversation_id, f"staff-message:{context.user_id}:{data.idempotency_key}")
+    existing = db.scalar(
+        select(Message).where(Message.tenant_id == context.tenant_id, Message.id == message_id)
+    )
+    if existing is not None:
+        if (
+            existing.conversation_id != conversation_id
+            or existing.created_by != context.user_id
+            or existing.source != "manual"
+            or existing.role != data.role
+            or existing.content != data.content
+            or existing.message_metadata != data.metadata
+        ):
+            raise AppError(409, "idempotency_conflict", "Message key already has different input")
+        return existing
     if conversation.status != "open":
         raise AppError(
             409, "conversation_closed", "Closed conversations cannot receive new messages"
@@ -75,11 +131,14 @@ def append_message(db, context, conversation_id, data, request):
         operations.public_reply_guard(db, context, conversation, request)
     expire_active_calls(db, context, conversation_id, request)
     message = Message(
+        id=message_id,
         tenant_id=context.tenant_id,
         conversation_id=conversation_id,
         created_by=context.user_id,
         role=data.role,
         content=data.content,
+        # The transaction may have started before waiting for the conversation lock.
+        created_at=func.clock_timestamp(),
         message_metadata=data.metadata,
     )
     db.add(message)
@@ -92,7 +151,17 @@ def append_message(db, context, conversation_id, data, request):
 
 
 def history(
-    db, context, conversation_id, limit, offset, request, newest=False, *, after=None, before=None
+    db,
+    context,
+    conversation_id,
+    limit,
+    offset,
+    request,
+    newest=False,
+    *,
+    after=None,
+    before=None,
+    at=None,
 ):
     get_owned(db, Conversation, context, conversation_id)
     if after and before:
@@ -106,6 +175,8 @@ def history(
     query = select(Message).where(
         Message.tenant_id == context.tenant_id, Message.conversation_id == conversation_id
     )
+    if at is not None:
+        query = query.where(Message.id == at)
     if after or before:
         anchor = get_owned(db, Message, context, after or before)
         if anchor.conversation_id != conversation_id:
@@ -131,14 +202,25 @@ def history(
     rows = list(db.scalars(query.order_by(*ordering).limit(limit).offset(offset)))
     if descending:
         rows.reverse()
-    from support_agent.models import ModelCall, ToolExecution
+    from support_agent.models import ModelCall, ReplyDraft, ToolExecution
     from support_agent.schemas import MessageOut
     from support_agent.services.tool_execution import ensure_delivery
 
     # Batch associations for this page; permission/source checks below remain per call.
+    drafts = {
+        draft.sent_message_id: draft
+        for draft in db.scalars(
+            select(ReplyDraft).where(
+                ReplyDraft.tenant_id == context.tenant_id,
+                ReplyDraft.conversation_id == conversation_id,
+                ReplyDraft.sent_message_id.in_([row.id for row in rows]),
+                ReplyDraft.status == "ACCEPTED",
+            )
+        )
+    }
     call_ids = {
         row.model_call_id for row in rows if row.source in {"agent", "rag"} and row.role != "user"
-    }
+    } | {draft.model_call_id for draft in drafts.values() if draft.model_call_id}
     calls = (
         {
             call.id: call
@@ -163,9 +245,10 @@ def history(
     checked = {}
     result = []
     for row in rows:
-        if row.source in {"agent", "rag"} and row.role != "user":
-            if row.model_call_id not in checked:
-                call = calls.get(row.model_call_id)
+        call_id = drafts[row.id].model_call_id if row.id in drafts else row.model_call_id
+        if row.role != "user" and (row.source in {"agent", "rag"} or row.id in drafts):
+            if call_id not in checked:
+                call = calls.get(call_id)
                 if call is None:
                     from support_agent.errors import missing
 
@@ -182,7 +265,7 @@ def history(
                     )
                 except AppError:
                     checked[call.id] = False
-            if not checked[row.model_call_id]:
+            if not checked[call_id]:
                 result.append(
                     MessageOut.model_validate(row).model_copy(
                         update={
@@ -192,11 +275,23 @@ def history(
                     )
                 )
                 continue
+        if row.id in drafts:
+            # Also mark suggestions accepted before the provenance metadata existed.
+            result.append(
+                MessageOut.model_validate(row).model_copy(
+                    update={
+                        "metadata": row.message_metadata
+                        | {"reply_draft_id": str(drafts[row.id].id)}
+                    }
+                )
+            )
+            continue
         result.append(row)
     return result
 
 
 def set_handling(db, context, conversation_id, data, request):
+    context = locked_staff_context(db, context, request)
     row = get_owned(db, Conversation, context, conversation_id, lock=True)
     operations.check_version(row, data.expected_version)
     if row.status == "closed":

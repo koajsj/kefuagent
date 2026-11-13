@@ -50,6 +50,8 @@ class ApiAdapter implements Adapter {
     }
     const assertCurrent = () => {
       if (!publicPath && epoch !== this.generation) throw new StaleResponse();
+      if (controller.signal.aborted)
+        throw new DOMException("请求已取消，结果可能未知。", "AbortError");
     };
     try {
       const response = await fetch("/api/v1" + path, {
@@ -62,11 +64,18 @@ class ApiAdapter implements Adapter {
       });
       assertCurrent();
       options.onHeaders?.(response.headers);
-      if (response.ok && options.onEvent)
-        return (await readEvents(response, (event, value) => {
+      if (response.ok && options.responseType === "blob") {
+        if (!response.headers.get("content-type")?.includes("application/octet-stream")) throw new Error("文件响应格式错误。");
+        const blob = await response.blob(); assertCurrent(); return blob as T;
+      }
+      if (response.ok && options.onEvent) {
+        const result = await readEvents(response, (event, value) => {
           assertCurrent();
           options.onEvent!(event, value);
-        })) as T;
+        });
+        assertCurrent();
+        return result as T;
+      }
       if (
         response.status !== 204 &&
         !response.headers.get("content-type")?.includes("application/json")

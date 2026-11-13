@@ -22,7 +22,13 @@ export function Agents() {
     [search, setSearch] = useState(""),
     [edit, setEdit] = useState<Row | null>(null),
     [binding, setBinding] = useState<Row | null>(null),
+    [history, setHistory] = useState<Row | null>(null),
+    [historyOffset, setHistoryOffset] = useState(0),
     [busy, setBusy] = useState(false);
+  const changes = useResource<Row[]>(
+    (signal) => history ? api.request(`/agent-configs/${history.id}/changes?limit=20&offset=${historyOffset}`, { signal }) : Promise.resolve([]),
+    [api, tenant, history?.id, historyOffset],
+  );
   const agents = useResource<Row[]>(
     (signal) =>
       api.request(
@@ -92,6 +98,7 @@ export function Agents() {
               instructions: data.get("instructions"),
               language: data.get("language"),
               answer_mode: data.get("answer_mode"),
+              autonomy_max_risk: Number(data.get("autonomy_max_risk")),
             },
             runtime: {
               temperature: Number(data.get("temperature")),
@@ -167,9 +174,12 @@ export function Agents() {
             a.version,
             <Status value={a.enabled ? "active" : "inactive"} />,
             role === "admin" ? (
+              <div className="actions">
               <Button variant="secondary" onPress={() => open(a)}>
                 编辑
               </Button>
+              <Button variant="secondary" onPress={() => { setHistory(a); setHistoryOffset(0); }}>变更记录</Button>
+              </div>
             ) : (
               "只读"
             ),
@@ -192,6 +202,12 @@ export function Agents() {
           ；批准主机：{setup.data.model_allowed_hosts?.join("、") || "无"}。
         </p>
       )}
+      {history && <EditorModal title={`${history.name} · 配置变更`} onClose={() => setHistory(null)}>
+        <p>仅记录版本和变更字段，不存储历史 Prompt 或密钥，不支持回滚；旧记录没有版本信息时显示未知。公开入口变更后仍需重新发布。</p>
+        <ErrorNotice error={changes.error} retry={changes.reload} />
+        {changes.loading ? <p role="status">正在加载…</p> : !changes.error && (changes.data?.length ? <DataTable columns={["时间", "版本", "操作 / 字段", "请求 ID"]} rows={changes.data.map((row) => [new Date(row.created_at).toLocaleString(), row.config_version == null ? "未知" : `v${row.config_version}`, `${row.action} · ${row.changed_fields.join("、") || "未记录字段"}`, row.request_id])} /> : <p>没有已保留的配置变更记录。</p>)}
+        <Pager offset={historyOffset} count={changes.data?.length || 0} size={20} onChange={setHistoryOffset} />
+      </EditorModal>}
       {edit && binding && (
         <EditorModal
           onClose={() => {
@@ -275,6 +291,7 @@ export function Agents() {
                 defaultValue={edit.behavior?.language || "zh"}
               />
             </Field>
+            <Field label="自治上限（仍需工具授权）"><select name="autonomy_max_risk" defaultValue={edit.behavior?.autonomy_max_risk ?? 1}><option value={0}>R0 信息回答</option><option value={1}>R1 只读</option><option value={2}>R2 可逆客服命令</option></select></Field>
             <Field label="回答方式">
               <select
                 name="answer_mode"

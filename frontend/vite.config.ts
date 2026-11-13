@@ -56,15 +56,10 @@ export default defineConfig(({ mode, command }) => {
                   : "Production must not contain fictional Demo data",
               );
           }
-          let source = readFileSync(
-            new URL("../src/support_agent/web/widget.js", import.meta.url),
+          const source = readFileSync(
+            new URL(demo ? "../src/support_agent/web/widget-demo.js" : "../src/support_agent/web/widget.js", import.meta.url),
             "utf8",
           );
-          if (demo)
-            source = source.replace(
-              'const chatUrl = origin + "/chat/" + id;',
-              'const chatUrl = new URL("./", script.src).href + "#/chat/" + id;',
-            );
           this.emitFile({ type: "asset", fileName: "widget.js", source });
           this.emitFile({
             type: "asset",

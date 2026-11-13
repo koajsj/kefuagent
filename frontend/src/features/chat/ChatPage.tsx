@@ -1,5 +1,8 @@
+import { ReplySuggestions } from "./ReplySuggestions";
 import { Button } from "@heroui/react";
 import { useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
+import { useThreadScroll } from "../../hooks/useThreadScroll";
 import { useApp } from "../../app/context";
 import type {
   Row,
@@ -12,11 +15,16 @@ import { sessionState } from "../../adapters/storage";
 import { explain } from "../../adapters/errors";
 import { Message, Pager, date, errorText, phases } from "./shared";
 import { Operations } from "./Operations";
-export function ChatPage() {
-  const { api, tenant } = useApp();
+import { PersonalReplies, PersonalViews } from "./PersonalTools";
+import { RunInspector } from "./RunInspector";
+export function ChatPage({ defaultQueue = "all" }: { defaultQueue?: string }) {
+  const { api, tenant, user, notify } = useApp();
+  const location = useLocation();
+  const source = location.state as { conversationId?: string; messageId?: string } | null;
   const [rows, setRows] = useState<ConversationRecord[]>([]),
     [offset, setOffset] = useState(0),
-    [filters, setFilters] = useState<Record<string, string>>({}),
+    [filters, setFilters] = useState<Record<string, string>>({ queue: defaultQueue }),
+    [filterFormVersion, setFilterFormVersion] = useState(0),
     [operators, setOperators] = useState<Row[] | null>(null),
     [operatorsError, setOperatorsError] = useState(""),
     [selected, setSelected] = useState<ConversationRecord | null>(null),
@@ -25,8 +33,12 @@ export function ChatPage() {
     [busy, setBusy] = useState(false),
     [reload, setReload] = useState(0),
     [opening, setOpening] = useState(false),
+    [creating, setCreating] = useState(false),
     [subject, setSubject] = useState("");
   const openEpoch = useRef(0),
+    listEpoch = useRef(0),
+    listLoading = useRef(false),
+    createPending = useRef(false),
     operatorEpoch = useRef(0);
   const alive = useRef(true);
   useEffect(() => {
@@ -38,6 +50,8 @@ export function ChatPage() {
   }, []);
   useEffect(() => {
     const ctrl = new AbortController();
+    const ticket = ++listEpoch.current;
+    listLoading.current = true;
     setLoading(true);
     setError("");
     api
@@ -46,15 +60,15 @@ export function ChatPage() {
         { signal: ctrl.signal },
       )
       .then((result) => {
-        if (!ctrl.signal.aborted) setRows(result);
+        if (!ctrl.signal.aborted && ticket === listEpoch.current) setRows(result);
       })
       .catch((e) => {
-        if (!ctrl.signal.aborted) setError(errorText(e));
+        if (!ctrl.signal.aborted && ticket === listEpoch.current) { setRows([]); setError(errorText(e)); }
       })
       .finally(() => {
-        if (!ctrl.signal.aborted) setLoading(false);
+        if (!ctrl.signal.aborted) { listLoading.current = false; setLoading(false); }
       });
-    return () => ctrl.abort();
+    return () => { ctrl.abort(); listLoading.current = false; };
   }, [api, tenant, offset, filters, reload]);
   async function loadOperators() {
     const ticket = ++operatorEpoch.current;
@@ -91,22 +105,67 @@ export function ChatPage() {
       if (alive.current && ticket === openEpoch.current) setOpening(false);
     }
   }
+  useEffect(() => {
+    if (source?.conversationId) void open(source.conversationId);
+  }, [source?.conversationId]);
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>, stopped = false, failures = 0;
+    let ctrl: AbortController | undefined;
+    const schedule = (delay = 5000) => { clearTimeout(timer); if (!stopped && !document.hidden) timer = setTimeout(poll, delay); };
+    async function poll() {
+      if (stopped || document.hidden) return;
+      if (listLoading.current) { schedule(); return; }
+      ctrl = new AbortController();
+      const ticket = ++listEpoch.current;
+      try {
+        const result = await api.request<ConversationRecord[]>(`/conversations?${new URLSearchParams({ limit: "20", offset: String(offset), ...Object.fromEntries(Object.entries(filters).filter(([, v]) => v)) })}`, { signal: ctrl.signal });
+        if (!stopped && !ctrl.signal.aborted && ticket === listEpoch.current) { setRows(result); failures = 0; }
+      } catch { if (!ctrl.signal.aborted) failures = Math.min(4, failures + 1); }
+      finally { schedule(Math.min(60000, 5000 * 2 ** failures)); }
+    }
+    const visibility = () => { if (document.hidden) { clearTimeout(timer); ctrl?.abort(); } else schedule(); };
+    document.addEventListener("visibilitychange", visibility);
+    schedule();
+    return () => { stopped = true; clearTimeout(timer); ctrl?.abort(); document.removeEventListener("visibilitychange", visibility); };
+  }, [api, tenant, offset, filters]);
   async function create(e: React.FormEvent) {
     e.preventDefault();
-    if (!subject.trim()) return;
+    if (!subject.trim() || createPending.current || busy || opening) return;
+    createPending.current = true;
+    setCreating(true);
     setError("");
+    let persisted = true;
     try {
+      const payload = { subject: subject.trim(), channel: "web" };
+      const identity = await requestIdentity(payload);
+      if (!alive.current) return;
+      // Keep separate unresolved identities when the operator edits then restores a title.
+      const keyName = `support.pending.conversation-create.${api.mode}.${tenant}.${user.id}.${identity.digest}`;
+      const requestKey = sessionState.get(keyName) || identity.key;
+      persisted = sessionState.set(keyName, requestKey);
       const result = await api.request<ConversationRecord>("/conversations", {
         method: "POST",
-        body: { subject: subject.trim(), channel: "web" },
+        body: { ...payload, idempotency_key: requestKey },
       });
+      // A response received after navigation was not acknowledged by this workspace.
       if (!alive.current) return;
+      if (
+        !result || typeof result.id !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.id) ||
+        result.tenant_id !== tenant || result.created_by !== user.id
+      )
+        throw new Error("会话创建响应不完整或归属不符，结果仍未知。已保留原请求标识，请核对列表或使用相同标题重试。");
+      sessionState.remove(keyName);
+      notify("会话已就绪。后续加载失败时，请从列表重新打开，无需再次创建。");
       setSubject("");
       setOffset(0);
       setReload((v) => v + 1);
       await open(result.id);
     } catch (e) {
-      if (alive.current) setError(errorText(e));
+      if (alive.current) setError(errorText(e) + (persisted ? "" : " 浏览器无法持久保存请求标识；请勿刷新，先核对会话列表。"));
+    } finally {
+      createPending.current = false;
+      if (alive.current) setCreating(false);
     }
   }
   return (
@@ -120,6 +179,7 @@ export function ChatPage() {
           <input
             aria-label="新会话标题"
             value={subject}
+            disabled={creating}
             onChange={(e) => setSubject(e.target.value)}
             placeholder="新会话标题"
             required
@@ -129,7 +189,7 @@ export function ChatPage() {
             variant="primary"
             className="primary"
             type="submit"
-            isDisabled={busy || opening}
+            isDisabled={busy || opening || creating}
           >
             新建会话
           </Button>
@@ -145,7 +205,9 @@ export function ChatPage() {
       )}
       <div className="chat-layout">
         <aside className="conversation-sidebar">
+          <PersonalViews key={`${api.mode}.${tenant}.${user.id}`} filters={filters} onApply={(next) => { setFilters(next); setOffset(0); setFilterFormVersion((v) => v + 1); }} />
           <form
+            key={filterFormVersion}
             className="operation-filters"
             onSubmit={(e) => {
               e.preventDefault();
@@ -160,11 +222,12 @@ export function ChatPage() {
           >
             <input
               name="q"
+              defaultValue={filters.q || ""}
               placeholder="搜索会话标题"
               aria-label="搜索标题"
               maxLength={100}
             />
-            <select name="queue" aria-label="会话队列">
+            <select name="queue" aria-label="会话队列" defaultValue={filters.queue || "all"}>
               {[
                 "all",
                 "pending",
@@ -189,15 +252,16 @@ export function ChatPage() {
                 </option>
               ))}
             </select>
-            <select name="assignee_id" aria-label="负责人">
+            <select name="assignee_id" aria-label="负责人" defaultValue={filters.assignee_id || ""}>
               <option value="">全部负责人</option>
+              {filters.assignee_id && !operators?.some((o) => o.id === filters.assignee_id) && <option value={filters.assignee_id}>已保存的负责人（当前不可用）</option>}
               {operators?.map((o) => (
                 <option key={o.id} value={o.id}>
                   {o.display_name}
                 </option>
               ))}
             </select>
-            <select name="priority" aria-label="优先级">
+            <select name="priority" aria-label="优先级" defaultValue={filters.priority || ""}>
               <option value="">全部优先级</option>
               {["low", "normal", "high", "urgent"].map((p, i) => (
                 <option key={p} value={p}>
@@ -205,8 +269,13 @@ export function ChatPage() {
                 </option>
               ))}
             </select>
-            <select name="sort" aria-label="排序">
-              <option value="newest">最新优先</option>
+            <input name="tag" aria-label="会话标签" placeholder="按完整标签筛选" maxLength={40} defaultValue={filters.tag || ""} />
+            <select name="sort" aria-label="排序" defaultValue={filters.sort || "activity"}>
+              <option value="activity">最近活动</option>
+              <option value="customer_activity">最近客户发言</option>
+              <option value="priority">优先级</option>
+              <option value="sla">SLA</option>
+              <option value="newest">最新创建</option>
               <option value="oldest">最早优先</option>
             </select>
             <Button variant="secondary" type="submit">
@@ -236,9 +305,9 @@ export function ChatPage() {
                   onPress={() => open(r.id)}
                 >
                   <strong>{r.subject}</strong>
-                  <span className="badge">{r.support_state}</span>
+                  <span className="badge">{r.support_state}{r.unread_count > 0 ? ` · 未读 ${r.unread_count}` : ""}</span>
                   <small>
-                    {date(r.updated_at)} · {r.priority || "normal"} · SLA{" "}
+                    {date(r.last_activity_at || r.updated_at)} · {r.priority || "normal"} · SLA{" "}
                     {r.sla?.state || "未知"}
                   </small>
                 </Button>
@@ -257,6 +326,7 @@ export function ChatPage() {
             key={selected.id}
             suspended={opening}
             initial={selected}
+            sourceMessageId={source?.conversationId === selected.id ? source.messageId : undefined}
             operators={operators}
             onBusy={setBusy}
             refresh={() => open(selected.id, true)}
@@ -274,6 +344,7 @@ export function ChatPage() {
 function Conversation({
   initial,
   suspended,
+  sourceMessageId,
   operators,
   onBusy,
   refresh,
@@ -281,6 +352,7 @@ function Conversation({
 }: {
   initial: ConversationRecord;
   suspended: boolean;
+  sourceMessageId?: string;
   operators: Row[] | null;
   onBusy: (v: boolean) => void;
   refresh: () => Promise<void>;
@@ -292,7 +364,10 @@ function Conversation({
     [historyOffset, setHistoryOffset] = useState(0),
     [historyLoading, setHistoryLoading] = useState(true),
     [historyError, setHistoryError] = useState(""),
+    [readError, setReadError] = useState(""),
     [newMessages, setNewMessages] = useState(false),
+    [sourceFocus, setSourceFocus] = useState<Row | null>(null),
+    [sourceError, setSourceError] = useState(""),
     [agents, setAgents] = useState<Agent[]>([]),
     [agent, setAgent] = useState(""),
     [agentQuery, setAgentQuery] = useState(""),
@@ -301,7 +376,7 @@ function Conversation({
     [agentLoading, setAgentLoading] = useState(true),
     [agentError, setAgentError] = useState(""),
     [agentReload, setAgentReload] = useState(0),
-    [content, setContent] = useState(""),
+    [content, setContent] = useState(() => sessionState.get(`support.draft.${tenant}.${user.id}.${initial.id}`) || ""),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [preview, setPreview] = useState(""),
@@ -315,11 +390,32 @@ function Conversation({
     pending = useRef<any>(null),
     state = useRef({ c, historyOffset, busy }),
     latest = useRef<string | null>(null),
+    readPosition = useRef<string | null>(null),
+    reading = useRef(false),
+    committedRead = useRef<string | null>(null),
     historyEpoch = useRef(0),
+    historyInFlight = useRef(false),
     agentRef = useRef(agent);
+  const scroll = useThreadScroll(messages, historyOffset, historyLoading);
   agentRef.current = agent;
   state.current = { c, historyOffset, busy };
-  const key = `support.pending.${tenant}.${c.id}`;
+  const key = `support.pending.${tenant}.${user.id}.${c.id}`;
+  const draftKey = `support.draft.${tenant}.${user.id}.${c.id}`;
+  async function markVisibleRead(messageId: string, signal: AbortSignal) {
+    if (reading.current || signal.aborted || document.hidden || !scroll.nearBottom.current || state.current.historyOffset !== 0 || readPosition.current === messageId) return;
+    reading.current = true;
+    let confirmed = false;
+    try {
+      await api.request(`/conversations/${c.id}/read`, { method: "POST", body: { message_id: messageId }, signal });
+      if (!signal.aborted) { confirmed = true; readPosition.current = messageId; setReadError(""); if (committedRead.current === messageId) setNewMessages(false); changed(); }
+    } catch (e) {
+      if (!signal.aborted) setReadError("已读状态更新失败：" + errorText(e));
+    } finally {
+      reading.current = false;
+      if (confirmed && committedRead.current && committedRead.current !== messageId) void markVisibleRead(committedRead.current, signal);
+    }
+  }
+  useEffect(() => { if (content) sessionState.set(draftKey, content); else sessionState.remove(draftKey); }, [content, draftKey]);
   useEffect(() => {
     controller.current = new AbortController();
     pending.current = (() => {
@@ -334,6 +430,12 @@ function Conversation({
       onBusy(false);
     };
   }, [key]);
+  useEffect(() => {
+    // Effects run after the transcript has committed. Never acknowledge a page
+    // that was merely fetched, or messages outside the visible latest transcript.
+    committedRead.current = !historyLoading && !historyError && historyOffset === 0 ? messages.at(-1)?.id || null : null;
+    if (committedRead.current) void markVisibleRead(committedRead.current, controller.current.signal);
+  }, [messages, historyLoading, historyError, historyOffset]);
   async function readRuns() {
     try {
       const r = await api.request<Row[]>(
@@ -356,8 +458,19 @@ function Conversation({
     setHistoryReload((v) => v + 1);
   }, [initial]);
   useEffect(() => {
+    setSourceFocus(null);
+    setSourceError("");
+    if (!sourceMessageId) return;
+    const ctrl = new AbortController();
+    api.request<Row>(`/conversations/${c.id}/messages/${encodeURIComponent(sourceMessageId)}`, { signal: ctrl.signal })
+      .then((message) => { if (!ctrl.signal.aborted) setSourceFocus(message); })
+      .catch((e) => { if (!ctrl.signal.aborted) setSourceError(errorText(e)); });
+    return () => ctrl.abort();
+  }, [api, c.id, sourceMessageId]);
+  useEffect(() => {
     const ctrl = new AbortController();
     const ticket = ++historyEpoch.current;
+    historyInFlight.current = true;
     setHistoryLoading(true);
     setHistoryError("");
     api
@@ -370,16 +483,16 @@ function Conversation({
         setMessages(r);
         if (!historyOffset) {
           latest.current = r.at(-1)?.id || null;
-          setNewMessages(false);
+          setNewMessages(!scroll.nearBottom.current);
         }
       })
       .catch((e) => {
         if (!ctrl.signal.aborted) setHistoryError(errorText(e));
       })
       .finally(() => {
-        if (!ctrl.signal.aborted) setHistoryLoading(false);
+        if (!ctrl.signal.aborted) { historyInFlight.current = false; setHistoryLoading(false); }
       });
-    return () => ctrl.abort();
+    return () => { ctrl.abort(); historyInFlight.current = false; };
   }, [api, c.id, historyOffset, historyReload]);
   useEffect(() => {
     const ctrl = new AbortController();
@@ -437,8 +550,7 @@ function Conversation({
     const active = () =>
       !stopped &&
       !paused &&
-      !document.hidden &&
-      state.current.c.status === "open";
+      !document.hidden;
     const schedule = (delay = 5000) => {
       clearTimeout(timer);
       if (active()) timer = setTimeout(poll, delay);
@@ -456,14 +568,22 @@ function Conversation({
           },
         );
         if (!active() || request.signal.aborted) return;
+        const wasClosed = state.current.c.status === "closed";
         update(next);
         state.current.c = next;
         if (next.status !== "open") {
+          if (!wasClosed) {
+            setHistoryOffset(0);
+            setHistoryReload((v) => v + 1);
+          }
+          return;
+        }
+        if (wasClosed) {
           setHistoryOffset(0);
           setHistoryReload((v) => v + 1);
           return;
         }
-        if (!state.current.busy) {
+        if (!state.current.busy && !historyInFlight.current) {
           const epoch = historyEpoch.current;
           const anchor = latest.current;
           const r = await api.request<Row[]>(
@@ -487,8 +607,11 @@ function Conversation({
                     ]
                   : r,
               );
-            else setNewMessages(true);
+            setNewMessages(state.current.historyOffset !== 0 || !scroll.nearBottom.current);
           }
+          // Retry only already rendered positions. Newly fetched rows are
+          // acknowledged by the post-commit effect, not from this network task.
+          if (!r.length && committedRead.current) await markVisibleRead(committedRead.current, request.signal);
         }
         failures = 0;
       } catch (e: any) {
@@ -504,7 +627,7 @@ function Conversation({
         }
       } finally {
         inFlight = false;
-        schedule(Math.min(60000, 5000 * 2 ** failures));
+        schedule(Math.min(60000, (state.current.c.status === "closed" ? 30000 : 5000) * 2 ** failures));
       }
     }
     const hide = () => {
@@ -552,13 +675,19 @@ function Conversation({
     setResult(null);
     const submitted = content;
     try {
-      if (human)
+      if (human) {
+        const payload = { role: "assistant", content: submitted };
+        pending.current = await requestIdentity(payload, pending.current);
+        if (controller.current.signal.aborted) return;
+        sessionState.set(key, JSON.stringify(pending.current));
         await api.request(`/conversations/${c.id}/messages`, {
           method: "POST",
-          body: { role: "assistant", content: submitted },
+          body: { ...payload, idempotency_key: pending.current.key },
           signal: controller.current.signal,
         });
-      else {
+        pending.current = null;
+        sessionState.remove(key);
+      } else {
         const payload = { agent_config_id: agent, content: submitted };
         pending.current = await requestIdentity(payload, pending.current);
         if (controller.current.signal.aborted) return;
@@ -586,8 +715,8 @@ function Conversation({
         setPreview("");
       }
       setContent((old) => (old === submitted ? "" : old));
-      setHistoryOffset(0);
-      setHistoryReload((v) => v + 1);
+      if (historyOffset === 0) setHistoryReload((v) => v + 1);
+      else setNewMessages(true);
       changed();
       await readRuns();
     } catch (e: any) {
@@ -595,7 +724,7 @@ function Conversation({
         setError(
           errorText(e) +
             (human
-              ? " 人工回复结果可能未知，请先刷新历史核实。"
+              ? " 人工回复结果可能未知；可保留相同内容和原请求标识重试。"
               : " 可保留相同内容重试，继续使用原请求标识。"),
         );
     } finally {
@@ -731,7 +860,7 @@ function Conversation({
             <select
               value={agent}
               onChange={(e) => setAgent(e.target.value)}
-              disabled={busy || c.channel === "public" || human}
+              disabled={busy || (c.channel === "public" && !human)}
             >
               <option value="">选择 Agent</option>
               {agents.map((a) => (
@@ -774,6 +903,11 @@ function Conversation({
         {c.support_state === "waiting" && (
           <p className="note">正在等待人工接管，AI 回复已暂停。</p>
         )}
+        {(sourceFocus || sourceError) && <section className="panel" aria-label="记忆来源">
+          <h3>记忆来源消息</h3>
+          {sourceError ? <p className="error">来源消息不可用：{sourceError}</p> : sourceFocus && <Message message={sourceFocus} highlight />}
+          <Button variant="secondary" onPress={() => { setSourceFocus(null); setSourceError(""); scroll.jumpToLatest(); setHistoryOffset(0); setHistoryReload((v) => v + 1); }}>返回最新消息</Button>
+        </section>}
         {historyError ? (
           <p role="alert" className="error">
             {historyError}
@@ -784,14 +918,18 @@ function Conversation({
               重试消息
             </Button>
           </p>
-        ) : historyLoading ? (
+        ) : historyLoading && !messages.length ? (
           <p>正在加载消息…</p>
         ) : (
-          <div className="thread" role="log" aria-label="对话历史">
+          <div className="thread" ref={scroll.thread} onScroll={() => {
+            scroll.onScroll();
+            const last = messages.at(-1);
+            if (last) void markVisibleRead(last.id, controller.current.signal);
+          }} role="log" aria-label="对话历史">
             {messages.length ? (
               messages.map((m) => (
+                <div key={m.id}>
                 <Message
-                  key={m.id}
                   message={m}
                   showSourceId={
                     c.channel !== "public" &&
@@ -800,6 +938,8 @@ function Conversation({
                     ["rag", "agent"].includes(m.source)
                   }
                 />
+                {m.role === "assistant" && m.model_call_id && c.channel !== "public" && <MemoryUsage callId={m.model_call_id} />}
+                </div>
               ))
             ) : (
               <p className="empty-state">
@@ -818,13 +958,22 @@ function Conversation({
           <Button
             variant="secondary"
             onPress={() => {
+              scroll.jumpToLatest();
               setHistoryOffset(0);
+              setNewMessages(false);
               setHistoryReload((v) => v + 1);
             }}
           >
             有新消息，查看最新
           </Button>
         )}
+        {readError && <p className="warning" role="status">{readError}</p>}
+        <PersonalReplies key={`${api.mode}.${tenant}.${user.id}`} subject={c.subject} operator={user.display_name || ""} onInsert={(value) => {
+          const next = content ? `${content}\n${value}` : value;
+          if (next.length > 4000) setError("插入后消息超过 4000 字，请先缩短内容。");
+          else { setContent(next); setError(""); }
+        }} />
+        {human && canHuman && !suspended && c.status === "open" && <ReplySuggestions key={`${api.mode}.${tenant}.${user.id}.${c.id}`} conversationId={c.id} agentId={agent} sent={() => { setHistoryOffset(0); setHistoryReload(v => v+1); void refresh(); changed(); void readRuns(); }} />}
         <form className="composer" onSubmit={submit}>
           <textarea
             aria-label="消息内容"
@@ -905,6 +1054,7 @@ function Conversation({
                 </p>
                 {r.error_category && <p>{explain(r.error_category)}</p>}
                 <pre>{JSON.stringify(r.steps, null, 2)}</pre>
+              <RunInspector conversationId={initial.id} callId={r.id} canReview={role === "admin" || c.assignee_id === user.id} />
               </details>
             ))
           )}
@@ -921,4 +1071,17 @@ function Conversation({
       </aside>
     </>
   );
+}
+
+function MemoryUsage({ callId }: { callId: string }) {
+  const { api } = useApp();
+  const [items, setItems] = useState<Row[]>([]), [error, setError] = useState(false);
+  useEffect(() => {
+    const ctrl = new AbortController();
+    api.request<{ memories: Row[] }>(`/user-memory/usage/${callId}`, { signal: ctrl.signal })
+      .then((value) => { if (!ctrl.signal.aborted) { setItems(value.memories); setError(false); } })
+      .catch((e) => { if (!ctrl.signal.aborted && ![403, 404].includes(e.status)) setError(true); });
+    return () => ctrl.abort();
+  }, [api, callId]);
+  return error ? <p className="note">个人记忆使用记录暂不可用。</p> : items.length ? <p className="note">本次回答使用的个人记忆：{items.map((item) => item.memory_key).join("、")}</p> : null;
 }

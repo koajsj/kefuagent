@@ -1,3 +1,8 @@
+import { KnowledgeIntelligence } from "../knowledge/KnowledgeIntelligence";
+import { SecurityControls } from "./SecurityControls";
+import { ServiceDesk } from "../desk";
+import { ControlCenter } from "./ControlCenter";
+import { ModelRouting } from "./ModelRouting";
 import { UserMemory } from "./UserMemory";
 import { Agents } from "./Agents";
 import { Operations } from "./Operations";
@@ -6,6 +11,15 @@ import { Publications } from "./Publications";
 import { Dashboard, Onboarding } from "./Overview";
 import { KnowledgePage } from "../knowledge";
 export function AdminPage({ page }: { page: string }) {
+  if (page === "indexes" || page === "retrieval") return <KnowledgeIntelligence />;
+  if (["erasure", "approvals", "budget", "widget-sites"].includes(page)) return <SecurityControls key={page} page={page} />;
+  if (page === "customers" || page === "tickets") return <ServiceDesk key={page} page={page} />;
+  if (["autonomy", "executions", "quality", "retention", "recovery", "integrations", "settings"].includes(page)) return <ControlCenter key={page} page={page} />;
+  if (page === "routing") return <ModelRouting />;
+  if (page === "providers") return <Operations page="credentials" />;
+  if (page === "usage") return <Operations page="activity" />;
+  if (page === "security") return <Operations page="activity" initialKind="audit" />;
+  if (page === "documents") return <KnowledgePage mode={page} />;
   if (page === "memory") return <UserMemory />;
   if (page === "agents") return <Agents />;
   if (page === "tools") return <Tools />;

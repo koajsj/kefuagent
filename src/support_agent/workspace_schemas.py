@@ -18,6 +18,7 @@ class WorkspaceOut(Output):
 
 
 class DemoImportOut(Output):
+    document_published: bool = False
     knowledge_base_id: UUID
     document_id: UUID
     agent_config_id: UUID

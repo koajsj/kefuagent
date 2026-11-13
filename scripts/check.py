@@ -1,4 +1,4 @@
-"""Static checks by default; --database inspects an explicitly configured CI database."""
+"""Static source and offline migration checks; never connects to a database."""
 
 import argparse
 import ast
@@ -9,6 +9,7 @@ from pathlib import Path
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from sqlalchemy import PrimaryKeyConstraint, UniqueConstraint
 from sqlalchemy.dialects import postgresql
 
 from support_agent.models import Base
@@ -17,10 +18,7 @@ from support_agent.preflight import EXPECTED_REVISION, RLS_TABLES
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--database", action="store_true", help="Inspect a fresh isolated CI database"
-    )
-    args = parser.parse_args()
+    parser.parse_args()
     for command in (
         [sys.executable, "-m", "ruff", "check", "."],
         [sys.executable, "-m", "ruff", "format", "--check", "."],
@@ -47,7 +45,32 @@ def main():
         [sys.executable, "-m", "alembic", "upgrade", "head", "--sql"], env=env, text=True
     )
     preparer = postgresql.dialect().identifier_preparer
+    schema_index_names = set()
     for table in Base.metadata.sorted_tables:
+        names = [item.name for item in table.constraints if item.name]
+        if len(names) != len(set(names)):
+            raise SystemExit(f"Duplicate constraint name: {table.name}")
+        for item in (
+            *table.indexes,
+            *[
+                c
+                for c in table.constraints
+                if isinstance(c, (PrimaryKeyConstraint, UniqueConstraint))
+            ],
+        ):
+            if item.name in schema_index_names:
+                raise SystemExit(f"Duplicate backing index name: {item.name}")
+            schema_index_names.add(item.name)
+        for foreign_key in table.foreign_key_constraints:
+            target = foreign_key.referred_table
+            columns = tuple(element.column.name for element in foreign_key.elements)
+            unique_keys = {
+                tuple(column.name for column in constraint.columns)
+                for constraint in target.constraints
+                if isinstance(constraint, (PrimaryKeyConstraint, UniqueConstraint))
+            }
+            if columns not in unique_keys:
+                raise SystemExit(f"Foreign key lacks a declared unique target: {foreign_key.name}")
         if f"CREATE TABLE {preparer.quote(table.name)} (" not in sql:
             raise SystemExit(f"Missing migration table: {table.name}")
         for item in (*table.constraints, *table.indexes):
@@ -62,30 +85,7 @@ def main():
     print(
         f"Static checks passed: {count} Python files, {len(revisions)} migrations, RLS declarations"
     )
-    if args.database:
-        if not os.environ.get("DATABASE_URL"):
-            raise SystemExit("--database requires explicit DATABASE_URL for a fresh isolated CI DB")
-        subprocess.run([sys.executable, "-m", "alembic", "check"], check=True)
-        from support_agent.config import Settings
-        from support_agent.db import build_database
-        from support_agent.preflight import inspect
-
-        engine, _ = build_database(Settings())
-        try:
-            checks = inspect(Settings(), engine)["checks"]
-            failures = [
-                item["name"]
-                for item in checks
-                if item["name"] in {"database_role", "database_revision", "tenant_rls"}
-                and item["status"] != "ok"
-            ]
-            if failures:
-                raise SystemExit("Database inspection failed: " + ", ".join(failures))
-        finally:
-            engine.dispose()
-        print("CI database schema, runtime role and FORCE RLS inspection passed")
-    else:
-        print("Live ORM/database schema comparison: NOT_RUN (use --database in isolated CI)")
+    print("Runtime behavior and live database schema: NEEDS_RUNTIME_VERIFICATION")
 
 
 if __name__ == "__main__":

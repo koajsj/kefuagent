@@ -7,6 +7,7 @@ from sqlalchemy import select, text
 
 from support_agent.errors import AppError
 from support_agent.models import AgentConfig, AgentKnowledgeBase, Document, KnowledgeBase
+from support_agent.rag_schemas import DocumentPublication
 from support_agent.schemas import AgentCreate
 from support_agent.services import knowledge
 from support_agent.services.audit import record
@@ -115,6 +116,18 @@ def import_demo(db, context, request):
             # An interrupted initial upload can leave a registered row without a private file.
             # Explicit retry repairs only this bundle's identical content through normal ingestion.
             doc, _ = knowledge.upload(db, context, kid, doc.filename, DEMO_TEXT, request)
+    if created and doc.status == "ready":
+        doc = knowledge.publish_document(
+            db,
+            context,
+            doc.id,
+            DocumentPublication(
+                expected_generation=doc.generation,
+                expected_updated_at=doc.updated_at,
+                published=True,
+            ),
+            request,
+        )
     record(
         db,
         request,
@@ -131,6 +144,7 @@ def import_demo(db, context, request):
         "document_id": doc.id,
         "agent_config_id": aid,
         "document_status": doc.status,
+        "document_published": doc.is_published,
         "created": created,
         "offline": True,
     }

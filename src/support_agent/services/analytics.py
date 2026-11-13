@@ -1,11 +1,14 @@
 """Bounded UTC cohort metrics; no message scans and no inferred answer correctness."""
 
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import func, select, text
 
 from support_agent.errors import AppError
 from support_agent.models import Conversation, ModelCall, ToolExecution
+from support_agent.services import costs
 
 
 def ratio(numerator, denominator):
@@ -84,7 +87,7 @@ def report(db, context, start, end):
     call_stats = one(f"""
         WITH calls AS ({calls}), enriched AS (
             SELECT c.*, ({usage_complete}) AS complete,
-                (c.kind = 'chat' OR {kb_truth}) AS knowledge,
+                (c.kind IN ('chat', 'agent') AND (c.kind = 'chat' OR {kb_truth})) AS knowledge,
                 {citation_truth} AS citation
             FROM calls c
         )
@@ -97,6 +100,29 @@ def report(db, context, start, end):
             count(*) FILTER (WHERE knowledge AND status IN ('answered', 'unresolved') AND citation) AS cited
         FROM enriched
     """)
+    # Reuse persisted per-step pricing snapshots, never today's prices or a
+    # currency-blind sum. The cohort is already bounded; stream only accounting JSON.
+    cost_subtotals = defaultdict(Decimal)
+    unknown_cost_calls = 0
+    cost_rows = db.execute(
+        select(ModelCall.steps, ModelCall.attempts)
+        .where(
+            ModelCall.tenant_id == tenant,
+            ModelCall.created_at >= start,
+            ModelCall.created_at < end,
+        )
+        .order_by(ModelCall.created_at, ModelCall.id)
+        .limit(10001)
+        .execution_options(yield_per=100)
+    )
+    for index, (steps, attempts) in enumerate(cost_rows):
+        if index >= 10000:
+            raise AppError(422, "analytics_range_too_large", "Narrow the accounting time range")
+        estimate = costs.estimate(steps)
+        for currency, amount in estimate["known_subtotals"].items():
+            cost_subtotals[currency] += Decimal(amount)
+        if not estimate["complete"] and not (not steps and attempts == 0):
+            unknown_cost_calls += 1
     tool_stats = one("""SELECT count(*) AS total, count(*) FILTER (WHERE status = 'succeeded') AS succeeded
         FROM tool_executions WHERE tenant_id = :tenant AND created_at >= :start AND created_at < :end""")
     model_rows = rows(f"""
@@ -197,7 +223,11 @@ def report(db, context, start, end):
             "output_tokens": call_stats["output_tokens"],
             "unknown_usage_calls": call_stats["unknown"],
             "known_cost": None,
-            "unknown_cost_calls": call_stats["total"],
+            "unknown_cost_calls": unknown_cost_calls,
+            "known_cost_subtotals": {
+                currency: str(amount) for currency, amount in cost_subtotals.items()
+            },
+            "cost_complete": unknown_cost_calls == 0,
             "models": [dict(row) for row in model_rows],
         },
         "trend": trend,

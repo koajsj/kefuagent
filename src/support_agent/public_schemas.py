@@ -58,6 +58,13 @@ class VisitorTurn(Input):
     idempotency_key: UUID
 
 
+class VisitorMessageReceipt(Output):
+    status: Literal["received"] = "received"
+    conversation_id: UUID
+    message_id: UUID
+    request_id: UUID
+
+
 class PublicToolResult(Output):
     name: str
     status: str
@@ -68,6 +75,7 @@ class PublicToolResult(Output):
 class PublicMessage(Output):
     id: UUID
     role: Literal["user", "assistant"]
+    source: Literal["manual", "rag", "agent"]
     content: str
     created_at: datetime
     citations: list[Citation] = Field(default_factory=list)

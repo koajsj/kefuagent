@@ -10,7 +10,7 @@ from jsonschema import Draft202012Validator
 from sqlalchemy import select
 
 from support_agent.db import set_tenant
-from support_agent.dependencies import resume_context
+from support_agent.dependencies import locked_staff_context, resume_context
 from support_agent.errors import AppError
 from support_agent.models import (
     AgentConfig,
@@ -21,20 +21,31 @@ from support_agent.models import (
     ToolDefinition,
     ToolExecution,
 )
+from support_agent.services import desk_tools
 from support_agent.services.audit import record
 from support_agent.services.resources import get_owned
+from support_agent.services.tool_connectors import (
+    PUBLIC_DENIED_KEYS,
+    SNAPSHOT_KEYS,
+    materialize,
+    still_current,
+)
 from support_agent.stream_events import notify
 from support_agent.tool_runtime import ToolFailure
 
 
 def bound_capability(tool, registry):
+    from support_agent.autonomy import decide
+
     capability = registry.get(tool.key, tool.version)
-    if tool.execution_type == "write" or tool.risk_level != "low":
-        return None, "approval_required"
-    if not capability or tool.execution_type != "read_only":
+    if capability is None:
         return None, "tool_not_bound"
-    if not capability.read_only:
-        return None, "approval_required"
+    expected = "read_only" if capability.read_only else "write"
+    if tool.execution_type != expected:
+        return None, "tool_not_bound"
+    decision = decide(tool, capability, ceiling=2)
+    if not decision.allowed and decision.reason != "approval_required":
+        return None, decision.reason
     if tool.parameters != capability.parameters or tool.output_schema != capability.output_schema:
         return None, "tool_contract_mismatch"
     return capability, None
@@ -46,7 +57,26 @@ def public_tool_allowed(db, context, tool_id):
     return allowed(db, context, tool_id)
 
 
+def proposal_allowed(tool, capability, context, config):
+    from support_agent.autonomy import decide
+
+    decision = decide(
+        tool,
+        capability,
+        ceiling=config.behavior.get("autonomy_max_risk", 1),
+        public=context.public_session_id is not None,
+    )
+    return decision.allowed or (
+        decision.reason == "approval_required"
+        and context.public_session_id is None
+        and config.behavior.get("autonomy_max_risk", 1) >= 2
+        and tool.key in desk_tools.COMMAND_KEYS
+    )
+
+
 def authorized_tools(db, context, config_id, registry):
+    config = get_owned(db, AgentConfig, context, config_id)
+
     tools = db.scalars(
         select(ToolDefinition)
         .join(
@@ -71,8 +101,12 @@ def authorized_tools(db, context, config_id, registry):
         tool
         for tool in tools
         if (context.role == "admin" or "tenant:admin" not in tool.permissions)
-        and (context.public_session_id is None or public_tool_allowed(db, context, tool.id))
+        and (
+            context.public_session_id is None
+            or (tool.key not in PUBLIC_DENIED_KEYS and public_tool_allowed(db, context, tool.id))
+        )
         and bound_capability(tool, registry)[1] is None
+        and proposal_allowed(tool, registry.get(tool.key, tool.version), context, config)
     ]
 
 
@@ -167,7 +201,16 @@ def parse_arguments(raw):
 
 
 def check_authorization(
-    db, context, call, tool, arguments, registry, *, validate_arguments=True, lock=True
+    db,
+    context,
+    call,
+    tool,
+    arguments,
+    registry,
+    *,
+    validate_arguments=True,
+    lock=True,
+    approved=False,
 ):
     conversation = get_owned(
         db, Conversation, context, call.conversation_id, lock=lock, refresh=True
@@ -196,7 +239,9 @@ def check_authorization(
         or ("tenant:admin" in tool.permissions and context.role != "admin")
     ):
         return None, "tool_not_authorized"
-    if context.public_session_id is not None and not public_tool_allowed(db, context, tool.id):
+    if context.public_session_id is not None and (
+        tool.key in PUBLIC_DENIED_KEYS or not public_tool_allowed(db, context, tool.id)
+    ):
         return None, "public_tool_denied"
     capability, reason = bound_capability(tool, registry)
     if reason:
@@ -205,6 +250,17 @@ def check_authorization(
         arguments is None or not Draft202012Validator(capability.parameters).is_valid(arguments)
     ):
         return None, "tool_arguments_invalid"
+    from support_agent.autonomy import decide
+
+    policy = decide(
+        tool,
+        capability,
+        ceiling=config.behavior.get("autonomy_max_risk", 1),
+        public=context.public_session_id is not None,
+        approved=approved,
+    )
+    if not policy.allowed:
+        return None, policy.reason
     return capability, None
 
 
@@ -248,6 +304,18 @@ def ensure_delivery(db, context, call, rows, request):
             if row.model_call_id == call.id
             else get_owned(db, ModelCall, context, row.model_call_id)
         )
+        from support_agent.models import ToolApproval
+
+        approved_receipt = (
+            db.scalar(
+                select(ToolApproval.id).where(
+                    ToolApproval.tenant_id == context.tenant_id,
+                    ToolApproval.execution_id == row.id,
+                    ToolApproval.status == "EXECUTED",
+                )
+            )
+            is not None
+        )
         _, reason = check_authorization(
             db,
             context,
@@ -257,14 +325,32 @@ def ensure_delivery(db, context, call, rows, request):
             request.app.state.tool_registry,
             validate_arguments=False,
             lock=False,
+            approved=approved_receipt,
         )
         if reason:
             raise AppError(409, reason, "Tool payload delivery is no longer authorized")
+        if (
+            row.status == "succeeded"
+            and row.tool_name in SNAPSHOT_KEYS | desk_tools.ALL_KEYS
+            and not still_current(
+                db, context, owner, row.tool_name, row.result, request.app.state.retriever
+            )
+        ):
+            raise AppError(409, "tool_snapshot_changed", "Tool snapshot is no longer current")
     return rows
 
 
-def invoke(db, context, call_id, model_tool_call, request, *, deadline=None):
-    context = resume_context(db, context, request)
+def invoke(db, context, call_id, model_tool_call, request, *, deadline=None, approval_id=None):
+    if approval_id is not None:
+        from support_agent.services.approvals import execution_context
+
+        context, gated_approver_id = execution_context(db, context, approval_id, request)
+    else:
+        context = (
+            locked_staff_context(db, context, request)
+            if model_tool_call.name in desk_tools.COMMAND_KEYS
+            else resume_context(db, context, request)
+        )
     # Consistent conversation -> call lock order across P2/P3 and direct execution.
     snapshot = get_owned(db, ModelCall, context, call_id)
     get_owned(db, Conversation, context, snapshot.conversation_id, lock=True)
@@ -295,8 +381,53 @@ def invoke(db, context, call_id, model_tool_call, request, *, deadline=None):
         .with_for_update()
         .execution_options(populate_existing=True)
     )
+    approval = None
+    if approval_id is not None:
+        from support_agent.services.approvals import check_execution
+
+        if context.public_session_id is not None or tool is None:
+            raise AppError(403, "approval_policy_denied", "Approval cannot authorize this context")
+        approval = check_execution(
+            db,
+            context,
+            approval_id,
+            call,
+            tool,
+            arguments,
+            request,
+            gated_approver_id=gated_approver_id,
+        )
     capability, reason = check_authorization(
-        db, context, call, tool, arguments, request.app.state.tool_registry
+        db,
+        context,
+        call,
+        tool,
+        arguments,
+        request.app.state.tool_registry,
+        approved=approval is not None,
+    )
+    from support_agent.autonomy import POLICY_VERSION, decide
+
+    policy = (
+        decide(tool, request.app.state.tool_registry.get(tool.key, tool.version), ceiling=2)
+        if tool
+        else None
+    )
+    record(
+        db,
+        request,
+        "agent.policy",
+        "model_call",
+        call.id,
+        tenant_id=context.tenant_id,
+        outcome="rejected" if reason else "success",
+        reason=reason,
+        details={
+            "policy_version": POLICY_VERSION,
+            "tool_id": str(tool.id) if tool else None,
+            "risk": policy.risk if policy else 4,
+            "decision": "denied" if reason else "allowed",
+        },
     )
     # Only trusted schema field names and presence are retained; no raw values or model-supplied keys.
     summary = {
@@ -323,6 +454,29 @@ def invoke(db, context, call_id, model_tool_call, request, *, deadline=None):
     db.add(row)
     db.flush()
     if reason:
+        if (
+            reason == "approval_required"
+            and context.public_session_id is None
+            and tool
+            and arguments is not None
+        ):
+            from support_agent.services.approvals import propose_execution
+
+            try:
+                with db.begin_nested():
+                    proposal = propose_execution(db, context, call, tool, arguments, row, request)
+                    row.argument_summary = summary | {"approval_id": str(proposal.id)}
+            except AppError as exc:
+                record(
+                    db,
+                    request,
+                    "approval.proposal_denied",
+                    "tool_execution",
+                    row.id,
+                    tenant_id=context.tenant_id,
+                    outcome="rejected",
+                    reason=exc.code,
+                )
         finish_execution(db, context, row, request, "denied", reason, elapsed=0)
         db.commit()
         return row
@@ -330,6 +484,66 @@ def invoke(db, context, call_id, model_tool_call, request, *, deadline=None):
     notify(request, "tool_running")
     audit_execution(db, context, row, request, "start")
     execution_id = row.id
+    if capability.key in desk_tools.COMMAND_KEYS:
+        if deadline is not None and time.monotonic() >= deadline:
+            finish_execution(db, context, row, request, "timed_out", "tool_timeout", elapsed=0)
+            db.commit()
+            return row
+        started = time.monotonic()
+        # Database effects and terminal execution evidence commit atomically. A
+        # savepoint preserves the rejection record without any partial business write.
+        try:
+            with db.begin_nested():
+                result = desk_tools.execute(
+                    db, context, call, row, capability.key, arguments, request
+                )
+                if not Draft202012Validator(capability.output_schema).is_valid(result):
+                    raise AppError(
+                        409, "tool_output_invalid", "Service command returned an invalid contract"
+                    )
+        except (AppError, ValueError) as exc:
+            finish_execution(
+                db,
+                context,
+                row,
+                request,
+                "denied",
+                exc.code if isinstance(exc, AppError) else "tool_arguments_invalid",
+                elapsed=int((time.monotonic() - started) * 1000),
+            )
+        else:
+            finish_execution(
+                db,
+                context,
+                row,
+                request,
+                "succeeded",
+                result=result,
+                elapsed=int((time.monotonic() - started) * 1000),
+            )
+        if approval is not None and row.status != "succeeded":
+            approval.status = "REVOKED"
+            approval.reason = "Execution was denied; submit a new reviewed operation"
+        if approval is not None and row.status == "succeeded":
+            approval.status = "EXECUTED"
+            approval.execution_id = row.id
+            from support_agent.services.audit import record as approval_audit
+
+            approval_audit(
+                db,
+                request,
+                "approval.executed",
+                "tool_approval",
+                approval.id,
+                tenant_id=context.tenant_id,
+                details={"execution_id": str(row.id), "payload_digest": approval.payload_digest},
+            )
+        if row.status == "succeeded" and capability.key == "human_handoff":
+            from support_agent.services.agent_turns import finish
+
+            finish(db, context, call, request, answer="已转交人工客服，请等待接入。")
+        db.commit()
+        return row
     tool_context = replace(
         context,
         conversation_id=call.conversation_id,
@@ -338,6 +552,13 @@ def invoke(db, context, call_id, model_tool_call, request, *, deadline=None):
         tool_call_id=model_tool_call.id,
         execution_id=execution_id,
     )
+    # Materialize under the same conversation lock as authorization. Only bounded data
+    # crosses the subprocess boundary; the worker never receives a DB connection.
+    runner_arguments = dict(arguments)
+    if capability.key in SNAPSHOT_KEYS:
+        runner_arguments["_snapshot"] = materialize(
+            db, context, call, capability.key, arguments, request.app.state.retriever
+        )
     db.commit()
     started = time.monotonic()
     result = None
@@ -350,7 +571,7 @@ def invoke(db, context, call_id, model_tool_call, request, *, deadline=None):
             capability = replace(
                 capability, timeout_seconds=min(capability.timeout_seconds, remaining)
             )
-        result = request.app.state.tool_runner.run(capability, arguments, tool_context)
+        result = request.app.state.tool_runner.run(capability, runner_arguments, tool_context)
         if (
             not isinstance(result, dict)
             or len(json.dumps(result, allow_nan=False).encode()) > 8192
@@ -393,6 +614,11 @@ def invoke(db, context, call_id, model_tool_call, request, *, deadline=None):
     _, reason = check_authorization(
         db, context, call, tool, arguments, request.app.state.tool_registry
     )
+    if not reason and status == "succeeded" and capability.key in SNAPSHOT_KEYS:
+        if not still_current(
+            db, context, call, capability.key, result, request.app.state.retriever
+        ):
+            reason = "tool_snapshot_changed"
     if reason:
         finish_execution(
             db, context, row, request, status, error, elapsed=elapsed, delivery_error=reason

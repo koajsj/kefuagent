@@ -120,34 +120,9 @@ export async function publicationsPage(ctx) {
       links.replaceChildren(message("服务器公开地址或入口标识无效，请联系部署管理员检查 WEB_ORIGIN。", "error"));
       return;
     }
-    const url = `${origin}/chat/${row.id}`;
-    const widget = `<script src="${origin}/widget.js" data-agent="${row.id}" defer></script>`;
-    const notice = el("div");
-    async function copy(value, field) {
-      try {
-        if (!navigator.clipboard?.writeText) throw new Error();
-        await navigator.clipboard.writeText(value);
-        notice.replaceChildren(message("已复制。"));
-      } catch {
-        field.focus();
-        field.select();
-        let copied = false;
-        try { copied = document.execCommand("copy"); } catch { /* Select for manual copy. */ }
-        notice.replaceChildren(message(copied ? "已复制。" : "无法自动复制，内容已选中，请手动复制。", copied ? "" : "warning"));
-      }
-    }
-    const linkField = input("", url, { readOnly: true });
-    const scriptField = el("textarea", { value: widget, readOnly: true, rows: 3 });
-    links.replaceChildren(panel("分享与嵌入",
-      el("p", {}, "配置或授权变更可能要求重新发布；重新发布会使旧访客会话失效。"),
-      label("公开链接", linkField),
-      actions(button("复制公开链接", () => copy(url, linkField)),
-        el("a", { href: url, target: "_blank", rel: "noopener" }, "在独立窗口打开客服")),
-      label("网站嵌入代码", scriptField),
-      button("复制嵌入代码", () => copy(widget, scriptField)),
-      notice,
-      el("p", { class: "note" }, "HTML：将脚本放在页面结束标签前。Vue / React：在应用入口 HTML 中添加脚本，避免重复加载。WordPress：使用允许脚本的主题或插件区域。宿主网站的 CSP 需允许本服务域名的 script-src 与 frame-src。"),
-      el("p", { class: "note" }, "脚本加载受限访客页面，不包含 API Key 或管理令牌。"),
+    links.replaceChildren(panel("可信网站接入",
+      el("p", {}, `发布 ID：${row.id} · v${row.version}。正式 Widget 需要网站验证和网站后端签发接口；不再提供无签名公开会话。`),
+      el("p", {}, "请使用 React 管理界面的「可信网站」页面登记精确 HTTPS 来源、验证文件和获取版本绑定的接入配置。旧直接 iframe/独立窗口入口已关闭。"),
     ));
   }
 

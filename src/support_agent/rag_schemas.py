@@ -26,6 +26,7 @@ class DocumentOut(Output):
     tenant_id: UUID
     filename: str
     size_bytes: int
+    is_published: bool
     media_type: str
     sha256: str
     status: Literal["pending", "processing", "ready", "failed", "deleting"]
@@ -34,6 +35,33 @@ class DocumentOut(Output):
     generation: int
     created_at: datetime
     updated_at: datetime
+
+
+class DeletionDocument(Output):
+    id: UUID
+    filename: str
+    status: str
+    generation: int
+    updated_at: datetime
+
+
+class KnowledgeDeletionPreview(Output):
+    remaining: int
+    batch_size: int
+    status: str
+    documents: list[DeletionDocument]
+    chunk_versions: int
+    executable: Literal[False]
+    blocked_reason: Literal["knowledge_reference_review_required"]
+    confirmation: None
+    unknown_dependencies: dict[str, None]
+    effects: dict[str, list[str]]
+
+
+class DocumentPublication(Input):
+    expected_generation: int = Field(ge=1)
+    expected_updated_at: datetime
+    published: bool
 
 
 class CredentialCreate(Input):
@@ -73,7 +101,13 @@ class SearchHit(Output):
     section: str | None
     generation: int
     strategy: Literal[
-        "postgres_fts", "postgres_fts_cjk", "postgres_rrf", "postgres_han_bounded"
+        "postgres_fts",
+        "postgres_fts_cjk",
+        "postgres_rrf",
+        "postgres_han_bounded",
+        "pgvector_cosine",
+        "hybrid_rrf",
+        "llm_rerank",
     ] = "postgres_fts"
 
 
@@ -165,7 +199,13 @@ class CallOut(Output):
             {
                 key: value
                 for key, value in step.items()
-                if key not in {"credential_id", "credential_stamp"}
+                if key
+                not in {
+                    "credential_id",
+                    "credential_stamp",
+                    "user_memory_used",
+                    "memory_submitted_at",
+                }
             }
             for step in steps
         ]
@@ -195,6 +235,14 @@ class SelectedQuote(Input):
     quote: str = Field(min_length=8, max_length=600)
 
 
+class ConnectionReply(Input):
+    ok: Literal[True]
+
+
+class EvidenceRanking(Input):
+    ranking: list[UUID] = Field(min_length=1, max_length=20)
+
+
 class EvidenceSelection(Input):
     answerable: bool
     citations: list[SelectedQuote] = Field(default_factory=list, max_length=3)
@@ -204,8 +252,12 @@ class EvidenceSelection(Input):
 class ChunkOut(Output):
     id: UUID
     document_id: UUID
+    root_chunk_id: UUID
     position: int
     generation: int
+    revision: int
+    is_current: bool
+    is_deleted: bool
     content: str
     page: int | None
     section: str | None

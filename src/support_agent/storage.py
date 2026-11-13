@@ -1,5 +1,6 @@
 """Local storage addressed exclusively by validated server UUIDs, never supplied paths."""
 
+import fcntl
 import os
 from pathlib import Path
 from uuid import UUID
@@ -26,24 +27,37 @@ class LocalDocumentStorage:
     def write(self, tenant_id, document_id, content):
         fd = self._directory(tenant_id)
         try:
-            # Exclusive creation has no temporary orphan lifecycle and is safe to repeat by digest.
+            # Serialize publishers/recovery, including a process killed mid-write.
+            # The deterministic pending path belongs to the same committed UUID row.
+            fcntl.flock(fd, fcntl.LOCK_EX)
             name = str(UUID(str(document_id)))
+            pending = f".{name}.pending"
             try:
-                out = os.open(
-                    name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd
-                )
-            except FileExistsError:
-                if self.read(tenant_id, document_id) != content:
+                existing = self.read(tenant_id, document_id)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None:
+                if existing != content:
                     raise OSError("Existing storage content differs") from None
+                try:
+                    os.unlink(pending, dir_fd=fd)
+                except FileNotFoundError:
+                    pass
+                os.fsync(fd)
                 return
+            out = os.open(
+                pending, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600, dir_fd=fd
+            )
             try:
                 with os.fdopen(out, "wb") as stream:
                     stream.write(content)
                     stream.flush()
                     os.fsync(stream.fileno())
-            except BaseException:
-                os.unlink(name, dir_fd=fd)
-                raise
+                # Hard-link publication cannot overwrite an existing final object.
+                os.link(pending, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+            finally:
+                os.unlink(pending, dir_fd=fd)
+                os.fsync(fd)
         finally:
             os.close(fd)
 
@@ -62,10 +76,14 @@ class LocalDocumentStorage:
     def delete(self, tenant_id, document_id):
         fd = self._directory(tenant_id)
         try:
-            try:
-                os.unlink(str(UUID(str(document_id))), dir_fd=fd)
-            except FileNotFoundError:
-                pass
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            name = str(UUID(str(document_id)))
+            for owned in (name, f".{name}.pending"):
+                try:
+                    os.unlink(owned, dir_fd=fd)
+                except FileNotFoundError:
+                    pass
+            os.fsync(fd)
         finally:
             os.close(fd)
 
@@ -75,3 +93,11 @@ class LocalDocumentStorage:
             return True
         except FileNotFoundError:
             return False
+
+
+def document_storage(settings):
+    if settings.document_storage_backend == "s3":
+        from support_agent.s3_storage import S3DocumentStorage
+
+        return S3DocumentStorage(settings)
+    return LocalDocumentStorage(settings.document_storage_root)

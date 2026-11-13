@@ -33,3 +33,18 @@ class MemoryOut(Output):
     expires_at: datetime
     created_at: datetime
     updated_at: datetime
+    last_used_at: datetime | None
+
+
+class MemoryUsageEntry(BaseModel):
+    id: UUID
+    memory_key: str
+    version: int
+    source_conversation_id: UUID
+    source_message_id: UUID
+
+
+class MemoryUsageOut(BaseModel):
+    call_id: UUID
+    memories: list[MemoryUsageEntry]
+    submitted_at: datetime | None
