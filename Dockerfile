@@ -1,4 +1,4 @@
-FROM node:22-slim AS frontend
+FROM node:25-slim AS frontend
 WORKDIR /web
 COPY frontend/package.json frontend/package-lock.json ./frontend/
 RUN cd frontend && npm ci --no-fund --no-audit
